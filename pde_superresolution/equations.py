@@ -18,7 +18,10 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import tensorflow as tf
 from typing import Mapping, Tuple, TypeVar
+
+from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
 
 
 # TODO(shoyer): replace with TypeVar('T', np.ndarray, tf.Tensor) when pytype
@@ -30,6 +33,7 @@ class Equation(object):
   """Base class for equations to integrate."""
 
   # TODO(shoyer): switch to use ClassVar when pytype supports it (b/72678203)
+  GRID_OFFSET = ...   # type: polynomials.GridOffset
   DERIVATIVE_ORDERS = ...  # type: Tuple[int, ...]
 
   def __init__(self,
@@ -117,6 +121,7 @@ class RandomForcing(object):
 class BurgersEquation(Equation):
   """Burger's equation with random forcing."""
 
+  GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 2)
 
   def __init__(self,
@@ -142,9 +147,43 @@ class BurgersEquation(Equation):
     return y_t + self.forcing(t, self.x)
 
 
+def _fixed_first_derivative(y: T, dx: float) -> T:
+  """Calculate a first-order derivative with second order finite differences.
+
+  This function works on both NumPy arrays and tf.Tensor objects.
+
+  Args:
+    y: array to differentiate, with shape [..., x].
+    dx: spacing between grid points.
+
+  Returns:
+    Differentiated array, same type and shape as `y`.
+  """
+  roll = np.roll if isinstance(y, np.ndarray) else tf.manip.roll
+  y_forward = roll(y, -1, axis=-1)
+  return (1 / dx) * (y_forward - y)
+
+
+class ConservativeBurgersEquation(BurgersEquation):
+  """Burgers constrained to obey the continuity equation."""
+
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_ORDERS = (0, 1)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+    del y  # unused
+    y = spatial_derivatives[0]
+    y_x = spatial_derivatives[1]
+    flux = self.eta * y_x - 0.5 * y ** 2
+    y_t = _fixed_first_derivative(flux, self.dx)
+    return y_t
+
+
 class KdVEquation(Equation):
   """Korteweg-de Vries (KdV) equation with random initial conditions."""
 
+  GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 3)
 
   def __init__(self,
@@ -175,9 +214,26 @@ class KdVEquation(Equation):
     return y_t_smoothed
 
 
+class ConservativeKdVEquation(KdVEquation):
+  """KdV constrained to obey the continuity equation."""
+
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_ORDERS = (0, 2)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+    del y  # unused
+    y = spatial_derivatives[0]
+    y_xx = spatial_derivatives[2]
+    flux = -3.0 * y ** 2 - y_xx
+    y_t = _fixed_first_derivative(flux, self.dx)
+    return y_t
+
+
 class KSEquation(Equation):
   """Kuramoto-Sivashinsky (KS) equation with random initial conditions."""
 
+  GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 2, 4)
 
   def __init__(self,
@@ -202,8 +258,31 @@ class KSEquation(Equation):
     return y_t
 
 
+class ConservativeKSEquation(KSEquation):
+  """KS constrained to obey the continuity equation."""
+
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_ORDERS = (0, 1, 3)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+    del y  # unused
+    y = spatial_derivatives[0]
+    y_x = spatial_derivatives[1]
+    y_xxx = spatial_derivatives[3]
+    flux = -0.5*y**2 - y_xxx - y_x
+    y_t = _fixed_first_derivative(flux, self.dx)
+    return y_t
+
+
 EQUATION_TYPES = {
     'burgers': BurgersEquation,
     'kdv': KdVEquation,
     'ks': KSEquation,
+}
+
+CONSERVATIVE_EQUATION_TYPES = {
+    'burgers': ConservativeBurgersEquation,
+    'kdv': ConservativeKdVEquation,
+    'ks': ConservativeKSEquation,
 }

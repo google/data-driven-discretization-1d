@@ -33,49 +33,15 @@ from __future__ import print_function
 import numbers
 
 import numpy as np
-import scipy.misc
 import tensorflow as tf
 from typing import Any, Callable, List, Union, Dict, Type, TypeVar
 
 from pde_superresolution import equations  # pylint: disable=invalid-import-order
 from pde_superresolution import layers  # pylint: disable=invalid-import-order
+from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
 
 
 TensorLike = Union[tf.Tensor, np.ndarray, numbers.Number]  # pylint: disable=invalid-name
-
-
-def _conv1d_periodic(inputs: tf.Tensor, filters: tf.Tensor, stride: int = 1,
-                     center: bool = False, **kwargs: Any) -> tf.Tensor:
-  """tf.nn.conv1d with periodic boundary conditions."""
-  padded_inputs = layers.pad_periodic(
-      inputs, filters.shape[0].value - 1, center=center)
-  return tf.nn.conv1d(padded_inputs, filters, stride, padding='VALID', **kwargs)
-
-
-def central_finite_differences(
-    inputs: tf.Tensor,
-    derivative_order: int = 1,
-    kernel_size: int = 5,
-    dx: float = 1.0) -> tf.Tensor:
-  """Calculate central finite differences using the standard tables.
-
-  Args:
-    inputs: tf.Tensor with dimensions [batch, x].
-    derivative_order: integer derivative order to calculate.
-    kernel_size: integer size of the finite difference kernel.
-    dx: spatial step size.
-
-  Returns:
-    tf.Tensor with dimensions [batch, x] with finite difference approximations
-    to spatial derivatives at each point.
-  """
-  filters = tf.convert_to_tensor(
-      scipy.misc.central_diff_weights(kernel_size, derivative_order),
-      dtype=tf.float32)
-  convolved = _conv1d_periodic(
-      inputs[..., tf.newaxis], filters[..., tf.newaxis, tf.newaxis],
-      stride=1, center=True)
-  return tf.squeeze(convolved / dx ** derivative_order, axis=2)
 
 
 def resample_mean(inputs: tf.Tensor, factor: int = 4) -> tf.Tensor:
@@ -119,13 +85,18 @@ def calculate_baseline_derivatives(
     inputs: tf.Tensor,
     equation: equations.Equation) -> List[tf.Tensor]:
   """Calculate all derivatives using standard finite differences."""
-  raw_space_derivatives = [
-      central_finite_differences(inputs, d, dx=equation.dx)
-      for d in equation.DERIVATIVE_ORDERS]
-  spatial_derivatives = {d: raw_space_derivatives[i]
-                         for i, d in enumerate(equation.DERIVATIVE_ORDERS)}
+  spatial_derivatives_list = []
+  for derivative_order in equation.DERIVATIVE_ORDERS:
+    grid = polynomials.regular_finite_difference_grid(
+        equation.GRID_OFFSET, derivative_order, dx=equation.dx)
+    spatial_derivatives_list.append(
+        polynomials.apply_finite_differences(inputs, grid, derivative_order)
+    )
+
+  zipped = zip(equation.DERIVATIVE_ORDERS, spatial_derivatives_list)
+  spatial_derivatives = {order: value for order, value in zipped}
   time_derivative = equation.equation_of_motion(inputs, spatial_derivatives)
-  return raw_space_derivatives + [time_derivative]
+  return spatial_derivatives_list + [time_derivative]
 
 
 def model_inputs(fine_inputs: tf.Tensor,
@@ -216,96 +187,11 @@ def make_dataset(snapshots: np.ndarray,
   return dataset
 
 
-class PolynomialAccuracyLayer(object):
-  """Layer to enforce polynomial accuracy for finite difference coefficients.
-
-  Attributes:
-    input_size: length of input vectors that are transformed into valid finite
-      difference coefficients.
-    bias: numpy array of shape (grid_size,) to which zero vectors are mapped.
-    nullspace: numpy array of shape (input_size, output_size) representing the
-      nullspace of the constraint matrix.
-  """
-
-  def __init__(self,
-               derivative_order: int,
-               polynomial_order: int = 2,
-               grid_size: int = 7,
-               dx: float = 1,
-               bias: np.ndarray = None,
-               out_scale: float = 1.0):
-    """Constructor.
-
-    Args:
-      derivative_order: integer derivative order to approximate.
-      polynomial_order: integer order of polynomial accuracy to enforce.
-      grid_size: size of the grid on which to generate centered finite
-        difference coefficients.
-      dx: distance between grid points.
-      bias: np.ndarray of shape (grid_size,) to which zero-vectors will be
-        mapped. Must satisfy polynomial accuracy to the requested order. By
-        default, we zero-pad the standard finite difference coefficient for the
-        requested polynomial order up to the desired grid size.
-      out_scale: desired multiplicative scaling on the outputs, relative to the
-        bias.
-    """
-    x = dx * np.arange(-(grid_size - 1) // 2, (grid_size - 1) // 2 + 1)
-
-    # size of the kernel for the nullspace operator
-    kernel_size = polynomial_order * ((derivative_order + 1) // 2) + 1
-
-    if bias is None:
-      padding = (grid_size - kernel_size) // 2
-      bias = np.pad(
-          (scipy.misc.central_diff_weights(kernel_size, derivative_order)
-           / dx ** derivative_order),
-          [(padding, padding)], mode='constant')
-    bias = np.array(bias)
-
-    A = np.stack([x ** m for m in range(kernel_size)])  # pylint: disable=invalid-name
-
-    b = np.zeros(kernel_size)
-    if derivative_order < kernel_size:
-      b[derivative_order] = scipy.special.factorial(derivative_order)
-    norm = np.linalg.norm(np.dot(A, bias) - b)
-    if norm > 1e-8:
-      raise ValueError('invalid bias, not in nullspace')  # pylint: disable=g-doc-exception
-
-    _, _, v = np.linalg.svd(A)
-    input_size = A.shape[1] - A.shape[0]
-    if not input_size:
-      raise ValueError(  # pylint: disable=g-doc-exception
-          'there is only one valid solution accurate to this order')
-    # nullspace from the SVD is always normalized such that its singular values
-    # are 1 or 0, which means it's actually independent of the scaling dx.
-    nullspace = v[-input_size:]
-
-    # ensure the nullspace is scaled comparably to the bias
-    scaled_nullspace = nullspace * (out_scale / dx ** derivative_order)
-
-    self.input_size = input_size
-    self.grid_size = grid_size
-    self.nullspace = scaled_nullspace.astype(np.float32)
-    self.bias = bias.astype(np.float32)
-
-  def apply(self, inputs: tf.Tensor) -> tf.Tensor:
-    """Apply this layer to inputs.
-
-    Args:
-      inputs: float32 Tensor with dimensions [batch, x, input_size].
-
-    Returns:
-      Float32 Tensor with dimensions [batch, x, grid_size].
-    """
-    nullspace = tf.convert_to_tensor(self.nullspace)
-    return self.bias + tf.einsum('bxi,ij->bxj', inputs, nullspace)
-
-
 def predict_coefficients(inputs: tf.Tensor,
                          equation_type: Type[equations.Equation],
                          reuse: object = tf.AUTO_REUSE,
                          training: bool = True,
-                         num_coefficients: int = 7,
+                         grid: np.ndarray = None,
                          num_layers: int = 3,
                          filter_size: int = 128,
                          ensure_unbiased: bool = True,
@@ -318,8 +204,7 @@ def predict_coefficients(inputs: tf.Tensor,
     equation_type: type of equation to integrate.
     reuse: whether or not to reuse TensorFlow variables.
     training: whether the model is training or not.
-    num_coefficients: number of coefficients for each finite difference
-      approximation.
+    grid: relative grid on which to predict finite difference coefficients.
     num_layers: number of convolutional layers in the neural network (0 or
       more).
     filter_size: filter size for each convolutional layer.
@@ -337,19 +222,19 @@ def predict_coefficients(inputs: tf.Tensor,
   Raises:
     ValueError: if polynomial accuracy constraints are infeasible.
   """
-  if polynomial_accuracy_order % 2:
-    raise ValueError('polynomial_accuracy_order must be even: {}'
-                     .format(polynomial_accuracy_scale))
-
   with tf.variable_scope('predict_coefficients', reuse=reuse):
 
     equation = equation_type(inputs.shape[-1].value)
     num_derivatives = len(equation.DERIVATIVE_ORDERS)
 
+    if grid is None:
+      grid = polynomials.regular_finite_difference_grid(
+          equation.GRID_OFFSET, derivative_order=0, accuracy_order=6)
+
     if num_layers == 0:
       # TODO(shoyer): still use PolynomialAccuracyLayer here
       coefficients = tf.get_variable(
-          'coefficients', (num_derivatives, num_coefficients))
+          'coefficients', (num_derivatives, grid.size))
       return tf.tile(coefficients[tf.newaxis, tf.newaxis, :, :],
                      [tf.shape(inputs)[0], inputs.shape[1].value, 1, 1])
 
@@ -363,9 +248,9 @@ def predict_coefficients(inputs: tf.Tensor,
 
     if not polynomial_accuracy_order:
       net = layers.conv1d_periodic_layer(
-          net, filters=num_derivatives*num_coefficients, kernel_size=3,
+          net, filters=num_derivatives*grid.size, kernel_size=3,
           activation=None, center=True)
-      new_dims = [num_derivatives, num_coefficients]
+      new_dims = [num_derivatives, grid.size]
       outputs = tf.reshape(net, tf.concat([tf.shape(inputs), new_dims], axis=0))
       outputs.set_shape(inputs.shape[:2].concatenate(new_dims))
 
@@ -379,11 +264,11 @@ def predict_coefficients(inputs: tf.Tensor,
       poly_accuracy_layers = []
       for derivative_order in equation.DERIVATIVE_ORDERS:
         poly_accuracy_layers.append(
-            PolynomialAccuracyLayer(derivative_order=derivative_order,
-                                    polynomial_order=polynomial_accuracy_order,
-                                    grid_size=num_coefficients,
-                                    dx=equation.dx,
-                                    out_scale=polynomial_accuracy_scale)
+            polynomials.PolynomialAccuracyLayer(
+                grid=grid,
+                derivative_order=derivative_order,
+                accuracy_order=polynomial_accuracy_order,
+                out_scale=polynomial_accuracy_scale)
         )
       input_sizes = [layer.input_size for layer in poly_accuracy_layers]
 
@@ -398,7 +283,7 @@ def predict_coefficients(inputs: tf.Tensor,
 
       outputs = tf.stack([layer.apply(net[..., start:stop])
                           for start, stop, layer in zipped], axis=-2)
-      assert outputs.shape.as_list()[-1] == num_coefficients
+      assert outputs.shape.as_list()[-1] == grid.size
 
     return outputs
 

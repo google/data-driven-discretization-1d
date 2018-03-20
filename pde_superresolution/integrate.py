@@ -25,6 +25,7 @@ from typing import Dict, Mapping, Type
 import xarray
 
 from pde_superresolution import equations  # pylint: disable=invalid-import-order
+from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
 from pde_superresolution import model  # pylint: disable=invalid-import-order
 from pde_superresolution import training  # pylint: disable=invalid-import-order
 
@@ -64,8 +65,7 @@ class BaselineDifferentiator(Differentiator):
   """Calculate derivatives using standard finite difference coefficients."""
 
   def __init__(self,
-               equation: equations.Equation,
-               kernel_size: int = 5):
+               equation: equations.Equation):
 
     with tf.Graph().as_default():
       self.inputs = tf.placeholder(tf.float32, shape=(equation.num_points,))
@@ -73,9 +73,10 @@ class BaselineDifferentiator(Differentiator):
 
       self.predictions = {}
       for order in equation.DERIVATIVE_ORDERS:
+        grid = polynomials.regular_finite_difference_grid(
+            equation.GRID_OFFSET, order, dx=equation.dx)
         self.predictions[order] = tf.squeeze(
-            model.central_finite_differences(
-                expanded_inputs, order, kernel_size, equation.dx),
+            polynomials.apply_finite_differences(expanded_inputs, grid, order),
             axis=0)
       self.sess = tf.Session()
 
@@ -136,6 +137,9 @@ def integrate_all(checkpoint_dir: str,
 
   if warmup:
     times = times + warmup  # pylint: disable=g-no-augmented-assignment
+    exact_times = np.concatenate([[0], times])
+  else:
+    exact_times = times
 
   if model_kwargs is None:
     model_kwargs = {}
@@ -146,12 +150,15 @@ def integrate_all(checkpoint_dir: str,
 
   logging.info('solving baseline model at high resolution')
   differentiator = BaselineDifferentiator(equation_high)
-  solution_exact = odeint(equation_high, differentiator,
-                          times=np.concatenate([[0], times]),
+  solution_exact = odeint(equation_high, differentiator, exact_times,
                           method=integrate_method)
 
-  y0 = solution_exact[0, ::resample_factor]
-  solution_exact = solution_exact[1:, :]
+  if warmup:
+    # use the sample after warmup to initialize later simulations
+    y0 = solution_exact[1, ::resample_factor]
+    solution_exact = solution_exact[1:, :]
+  else:
+    y0 = None
 
   logging.info('solving baseline model at low resolution')
   differentiator = BaselineDifferentiator(equation_low)

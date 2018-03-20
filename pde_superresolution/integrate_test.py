@@ -55,13 +55,19 @@ class IntegrateTest(parameterized.TestCase):
       {'equation_type': equations.BurgersEquation},
       {'equation_type': equations.KdVEquation},
       {'equation_type': equations.KSEquation},
+      {'equation_type': equations.ConservativeBurgersEquation},
+      {'equation_type': equations.ConservativeKdVEquation},
+      {'equation_type': equations.ConservativeKSEquation},
       {'equation_type': equations.BurgersEquation, 'warmup': 1},
   )
-  def test_integrate_all(self, equation_type):
+  def test_integrate_all(self, equation_type, warmup=0):
     self.train(equation_type)
+    resample_factor = 4
     results = integrate.integrate_all(
         self.checkpoint_dir, equation_type,
         times=np.linspace(0, 1, num=11),
+        warmup=warmup,
+        resample_factor=resample_factor,
         model_kwargs=self.model_kwargs)
 
     self.assertIsInstance(results, xarray.Dataset)
@@ -75,6 +81,13 @@ class IntegrateTest(parameterized.TestCase):
     y_exact_mean = results.y_exact.mean('x_high')
     xarray.testing.assert_allclose(
         y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
+
+    # all solutions should start with the same initial conditions
+    y_exact = results.y_exact.isel(time=0).values[::resample_factor]
+    np.testing.assert_allclose(
+        y_exact, results.y_baseline.isel(time=0).values)
+    np.testing.assert_allclose(
+        y_exact, results.y_model.isel(time=0).values)
 
 
 if __name__ == '__main__':

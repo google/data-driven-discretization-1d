@@ -32,15 +32,14 @@ def pad_periodic(inputs: tf.Tensor,
     inputs: tensor with shape [batch_size, length, num_features].
     padding: integer amount of padding to add along the length axis.
     center: bool indicating whether to center convolutions or not. Useful if you
-      need to align convolutional layers with different kernels. Requires
-      kernel_size to be odd.
+      need to align convolutional layers with different kernels.
     name: optional name for this operation.
 
   Returns:
     Padded tensor.
 
   Raises:
-    ValueError: if the covolution kernel would span more than once across the
+    ValueError: if the convolution kernel would span more than once across the
       periodic dimension.
   """
   if len(inputs.shape) != 3:
@@ -58,8 +57,6 @@ def pad_periodic(inputs: tf.Tensor,
       return tf.identity(inputs, name=scope)
 
     if center:
-      if padding % 2 != 0:
-        raise ValueError('cannot do centered padding if padding is not even')
       inputs_list = [inputs[:, -padding//2:, :],
                      inputs,
                      inputs[:, :padding//2, :]]
@@ -75,6 +72,14 @@ def _check_periodic_layer_shape(
   if num_x_points is not None:
     expected_in_length = num_x_points * strides
     assert expected_in_length == num_x_points, (outputs, inputs)
+
+
+def nn_conv1d_periodic(inputs: tf.Tensor, filters: tf.Tensor, stride: int = 1,
+                       center: bool = False, **kwargs: Any) -> tf.Tensor:
+  """tf.nn.conv1d with periodic boundary conditions."""
+  padded_inputs = pad_periodic(
+      inputs, filters.shape[0].value - 1, center=center)
+  return tf.nn.conv1d(padded_inputs, filters, stride, padding='VALID', **kwargs)
 
 
 def conv1d_periodic_layer(inputs: tf.Tensor,
@@ -93,8 +98,10 @@ def conv1d_periodic_layer(inputs: tf.Tensor,
     strides: integer specifying the stride length of the convolution.
     dilation_rate: integer specifying the dilation rate of the convolution.
     center: bool indicating whether to center convolutions or not. Useful if you
-      need to align convolutional layers with different kernels. Requires
-      kernel_size to be odd.
+      need to align convolutional layers with different kernels. If kernel_size
+      is even, then the result is shifted one half unit size to the left, e.g.,
+      for kernel_size=2, position 1 in the result by convolving over positions
+      0 and 1 on inputs.
     **kwargs: passed on to tf.layers.conv1d.
 
   Returns:
@@ -123,8 +130,10 @@ def max_pooling1d_periodic(inputs: tf.Tensor,
     pool_size: integer size of the pooling window.
     strides: integer specifying the stride length.
     center: bool indicating whether to center convolutions or not. Useful if you
-      need to align convolutional layers with different kernels. Requires
-      kernel_size to be odd.
+      need to align convolutional layers with different kernels. If kernel_size
+      is even, then the result is shifted one half unit size to the left, e.g.,
+      for kernel_size=2, position 1 in the result by convolving over positions
+      0 and 1 on inputs.
 
   Returns:
     Tensor with shape [batch_size, ceil(length / strides), filters].

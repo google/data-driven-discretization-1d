@@ -43,13 +43,14 @@ class TrainingTest(parameterized.TestCase):
       {'equation_type': equations.BurgersEquation},
       {'equation_type': equations.BurgersEquation,
        'polynomial_accuracy_order': 0},
+      {'equation_type': equations.ConservativeBurgersEquation},
       {'equation_type': equations.KdVEquation},
-      {'equation_type': equations.KSEquation},
+      {'equation_type': equations.ConservativeKdVEquation},
+      {'equation_type': equations.KSEquation, 'grid': np.arange(9) - 4},
+      {'equation_type': equations.ConservativeKSEquation},
       {'equation_type': equations.KSEquation, 'polynomial_accuracy_order': 0},
   )
-  def test_training_loop(self,
-                         equation_type,
-                         polynomial_accuracy_order=2):
+  def test_training_loop(self, equation_type, **kwargs):
     with tf.Graph().as_default():
       snapshots = np.random.RandomState(0).randn(500, 100)
       results = training.training_loop(
@@ -57,7 +58,7 @@ class TrainingTest(parameterized.TestCase):
           learning_rates=[1e-3],
           learning_stops=[20],
           eval_interval=10,
-          polynomial_accuracy_order=polynomial_accuracy_order)
+          **kwargs)
       self.assertIsInstance(results, pd.DataFrame)
       self.assertEqual(results.shape[0], 2)
 

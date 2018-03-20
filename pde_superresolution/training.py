@@ -270,14 +270,16 @@ def determine_loss_scales(
   data = load_dataset(dataset)
 
   baseline_error = (data['labels'] - data['baseline']) ** 2
-  error_floor = np.percentile(baseline_error, 100 * quantile, axis=(0, 1))
+  error_floor = np.maximum(
+      np.percentile(baseline_error, 100 * quantile, axis=(0, 1)), 1e-12)
 
   zero_predictions = np.zeros_like(data['labels'])
   components = np.stack(model.loss_components(predictions=zero_predictions,
                                               labels=data['labels'],
                                               baseline=data['baseline'],
                                               error_floor=error_floor))
-  error_scale = 1.0 / np.mean(components, axis=(1, 2))
+  baseline_error = np.mean(components, axis=(1, 2))
+  error_scale = np.where(baseline_error > 0, 1.0 / baseline_error, 0)
   return error_floor, error_scale
 
 
