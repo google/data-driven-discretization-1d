@@ -4,10 +4,11 @@ import setuptools
 
 INSTALL_REQUIRES = [
     'absl-py',
-    'tensorflow',
+    'h5py',
     'numpy',
     'pandas',
     'scipy',
+    'tensorflow',
     'xarray',
 ]
 
