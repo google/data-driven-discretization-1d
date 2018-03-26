@@ -279,6 +279,8 @@ def determine_loss_scales(
                                               baseline=data['baseline'],
                                               error_floor=error_floor))
   baseline_error = np.mean(components, axis=(1, 2))
+  logging.info('baseline_error: %s', baseline_error)
+
   error_scale = np.where(baseline_error > 0, 1.0 / baseline_error, 0)
   return error_floor, error_scale
 

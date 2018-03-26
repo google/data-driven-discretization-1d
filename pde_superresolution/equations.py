@@ -160,7 +160,9 @@ def _fixed_first_derivative(y: T, dx: float) -> T:
     Differentiated array, same type and shape as `y`.
   """
   roll = np.roll if isinstance(y, np.ndarray) else tf.manip.roll
-  y_forward = roll(y, -1, axis=-1)
+  # Note: we can't use negative axes in roll due to
+  # https://github.com/tensorflow/tensorflow/issues/17877
+  y_forward = roll(y, -1, axis=len(y.shape)-1)
   return (1 / dx) * (y_forward - y)
 
 
