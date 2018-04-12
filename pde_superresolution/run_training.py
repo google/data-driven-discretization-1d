@@ -17,7 +17,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import ast
 import os.path
 import shutil
 import tempfile
@@ -33,57 +32,20 @@ from pde_superresolution import equations  # pylint: disable=invalid-import-orde
 from pde_superresolution import training  # pylint: disable=invalid-import-order
 
 
-# files
 flags.DEFINE_string(
     'checkpoint_dir', None,
     'Directory to use for saving model')
-
-# inputs
 flags.DEFINE_string(
     'input_path', None,
     'Path to HDF5 file with input data.')
-flags.DEFINE_enum(
+flags.DEFINE_string(
     'equation', None, list(equations.EQUATION_TYPES),
     'Equation to integrate.')
-flags.DEFINE_boolean(
-    'conservative', True,
-    'Whether to solve the conservative equation or not.')
-flags.DEFINE_integer(
-    'resample_factor', 4,
-    'Factor by which to upscale from low to high resolution. Must evenly '
-    'divide the high resolution grid.')
-
-# model parameters
-flags.DEFINE_integer(
-    'num_layers', 3,
-    'Number of conv1d layers to use for coefficient prediction.')
-flags.DEFINE_integer(
-    'filter_size', 128,
-    'Filter size for conv1d layers.')
-flags.DEFINE_integer(
-    'polynomial_accuracy_order', 2,
-    'Order of polynomial accuracy to enforce.')
-flags.DEFINE_float(
-    'polynomial_accuracy_scale', 1.0,
-    'Scaling on output from the polynomial accuracy layer.')
-flags.DEFINE_float(
-    'relative_error_weight', 1e-6,
-    'Relative weighting for relative error term in the loss.')
-flags.DEFINE_float(
-    'time_derivative_weight', 1.0,
-    'Relative weighting for time (vs space) derivatives in the loss.')
-
-# training setup
 flags.DEFINE_string(
-    'learning_rates', '[1e-3, 1e-4]',
-    'Constant learning rates to use with Adam.')
-flags.DEFINE_string(
-    'learning_stops', '[20000, 40000]',
-    'Global steps at which to move on to the next learning rate or stop '
-    'training.')
-flags.DEFINE_integer(
-    'eval_interval', 250,
-    'Training step frequency at which to run evaluation.')
+    'hparams', '',
+    'Additional hyper-parameter values to use, in the form of a '
+    'comma-separated list of name=value pairs, e.g., '
+    '"num_layers=3,filter_size=64".')
 
 
 FLAGS = flags.FLAGS
@@ -109,25 +71,11 @@ def main(unused_argv):
   if FLAGS.checkpoint_dir:
     tf.gfile.MakeDirs(FLAGS.checkpoint_dir)
 
-  if FLAGS.conservative:
-    types = equations.CONSERVATIVE_EQUATION_TYPES
-  else:
-    types = equations.EQUATION_TYPES
-  equation_type = types[FLAGS.equation]
+  hparams = training.create_hparams(FLAGS.equation)
+  hparams.parse(FLAGS.hparams)
 
   logging.info('Starting training loop')
-  metrics_df = training.training_loop(
-      snapshots, equation_type, FLAGS.checkpoint_dir,
-      learning_rates=ast.literal_eval(FLAGS.learning_rates),
-      learning_stops=ast.literal_eval(FLAGS.learning_stops),
-      eval_interval=FLAGS.eval_interval,
-      resample_factor=FLAGS.resample_factor,
-      num_layers=FLAGS.num_layers,
-      polynomial_accuracy_order=FLAGS.polynomial_accuracy_order,
-      polynomial_accuracy_scale=FLAGS.polynomial_accuracy_scale,
-      filter_size=FLAGS.filter_size,
-      relative_error_weight=FLAGS.relative_error_weight,
-      time_derivative_weight=FLAGS.time_derivative_weight)
+  metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir, hparams)
 
   if FLAGS.checkpoint_dir:
     logging.info('Saving CSV with metrics')

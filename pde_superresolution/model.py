@@ -30,11 +30,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import numbers
 
 import numpy as np
 import tensorflow as tf
-from typing import Any, Callable, List, Union, Dict, Type, TypeVar
+from typing import List, Union, Dict, TypeVar
 
 from pde_superresolution import equations  # pylint: disable=invalid-import-order
 from pde_superresolution import layers  # pylint: disable=invalid-import-order
@@ -81,6 +82,12 @@ def subsample(inputs, factor=4):
   return inputs[:, ::factor]
 
 
+_RESAMPLE_FUNCS = {
+    'mean': resample_mean,
+    'subsample': subsample,
+}
+
+
 def calculate_baseline_derivatives(
     inputs: tf.Tensor,
     equation: equations.Equation) -> List[tf.Tensor]:
@@ -100,18 +107,13 @@ def calculate_baseline_derivatives(
 
 
 def model_inputs(fine_inputs: tf.Tensor,
-                 equation_type: Type[equations.Equation],
-                 resample: Callable[[tf.Tensor, int], tf.Tensor] = subsample,
-                 factor: int = 4,
-                ) -> Dict[str, tf.Tensor]:
+                 hparams: tf.contrib.training.HParams) -> Dict[str, tf.Tensor]:
   """Create coarse model inputs from high resolution simulations.
 
   Args:
     fine_inputs: float32 Tensor with shape [batch, x] with results of
       high-resolution simulations.
-    equation_type: type of equation being solved.
-    resample: function to use for resampling.
-    factor: factor by which to do resampling.
+    hparams: model hyperparameters.
 
   Returns:
     Dict of tensors with entries:
@@ -123,14 +125,17 @@ def model_inputs(fine_inputs: tf.Tensor,
        inputs.
   """
   num_x_points = fine_inputs.shape[-1].value
+  resample = functools.partial(_RESAMPLE_FUNCS[hparams.resample_method],
+                               factor=hparams.resample_factor)
+  equation_type = equations.from_hparams(hparams)
 
   fine_equation = equation_type(num_x_points)
   fine_derivatives = calculate_baseline_derivatives(
       fine_inputs, fine_equation)
-  labels = tf.stack([resample(d, factor) for d in fine_derivatives], axis=-1)
+  labels = tf.stack([resample(d) for d in fine_derivatives], axis=-1)
 
-  coarse_equation = equation_type(num_x_points // factor)
-  coarse_inputs = resample(fine_inputs, factor)
+  coarse_equation = equation_type(num_x_points // hparams.resample_factor)
+  coarse_inputs = resample(fine_inputs)
   baseline = tf.stack(
       calculate_baseline_derivatives(coarse_inputs, coarse_equation), axis=-1)
 
@@ -138,29 +143,18 @@ def model_inputs(fine_inputs: tf.Tensor,
 
 
 def make_dataset(snapshots: np.ndarray,
-                 equation_type: Type[equations.Equation],
-                 batch_size: int = 32,
-                 frac_training: float = 0.8,
+                 hparams: tf.contrib.training.HParams,
                  training: bool = True,
-                 repeat: bool = True,
-                 resample: Callable[[tf.Tensor, int], tf.Tensor] = subsample,
-                 factor: int = 4,
-                ) -> tf.data.Dataset:
+                 repeat: bool = True) -> tf.data.Dataset:
   """Create a tf.data.Dataset for training or evaluation data.
 
   Args:
     snapshots: np.ndarray with shape [examples, x] with high-resolution
       training data.
-    equation_type: type of equation being solved.
-    batch_size: integer batch size in the resulting array.
-    frac_training: fraction of the snapshots (between 0 and 1) from the start to
-      use for training. The remainder of snapshots will be reserved for
-      validation.
+    hparams: model hyperparameters.
     training: bool indicating whether to provide training or validation data.
     repeat: bool indicating whether the Dataset should repeat indefinitely or
       not.
-    resample: function to use for resampling.
-    factor: factor by which to do resampling.
 
   Returns:
     tf.data.Dataset containing a dictionary with three tensor values:
@@ -173,48 +167,32 @@ def make_dataset(snapshots: np.ndarray,
   """
   snapshots = np.asarray(snapshots, dtype=np.float32)
 
-  num_training = int(round(snapshots.shape[0] * frac_training))
+  num_training = int(round(snapshots.shape[0] * hparams.frac_training))
   indexer = slice(None, num_training) if training else slice(num_training, None)
-
   dataset = tf.data.Dataset.from_tensor_slices(snapshots[indexer])
+
   if repeat:
     dataset = dataset.shuffle(buffer_size=10000)
     dataset = dataset.repeat()
+
+  batch_size = hparams.base_batch_size * hparams.resample_factor
   dataset = dataset.batch(batch_size)
-  dataset = dataset.map(
-      lambda x: model_inputs(x, equation_type, resample, factor))
+  dataset = dataset.map(lambda x: model_inputs(x, hparams))
   dataset = dataset.prefetch(buffer_size=1)
   return dataset
 
 
 def predict_coefficients(inputs: tf.Tensor,
-                         equation_type: Type[equations.Equation],
+                         hparams: tf.contrib.training.HParams,
                          reuse: object = tf.AUTO_REUSE,
-                         training: bool = True,
-                         grid: np.ndarray = None,
-                         num_layers: int = 3,
-                         filter_size: int = 128,
-                         ensure_unbiased: bool = True,
-                         polynomial_accuracy_order: int = 2,
-                         polynomial_accuracy_scale: float = 1.0) -> tf.Tensor:
+                         training: bool = True) -> tf.Tensor:
   """Predict finite difference coefficients with a neural networks.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
-    equation_type: type of equation to integrate.
+    hparams: model hyperparameters.
     reuse: whether or not to reuse TensorFlow variables.
     training: whether the model is training or not.
-    grid: relative grid on which to predict finite difference coefficients.
-    num_layers: number of convolutional layers in the neural network (0 or
-      more).
-    filter_size: filter size for each convolutional layer.
-    ensure_unbiased: whether to ensure resulting coeffcients are unbiased, with
-      a sum equal to that of the standard finite difference coefficient. This is
-      only relevant if polynomial_accuracy_order is 0.
-    polynomial_accuracy_order: accuracy order to ensure for coefficients. Must
-      be an even integer.
-    polynomial_accuracy_scale: desired multiplicative scaling on the outputs
-      from the polynomial accuracy layer, relative to the bias.
 
   Returns:
     Float32 Tensor with dimensions [batch, x, derivative, coefficient].
@@ -223,15 +201,13 @@ def predict_coefficients(inputs: tf.Tensor,
     ValueError: if polynomial accuracy constraints are infeasible.
   """
   with tf.variable_scope('predict_coefficients', reuse=reuse):
+    equation_type = equations.from_hparams(hparams)
+    num_derivatives = len(equation_type.DERIVATIVE_ORDERS)
+    grid = polynomials.regular_finite_difference_grid(
+        equation_type.GRID_OFFSET, derivative_order=0,
+        accuracy_order=hparams.coefficient_grid_min_size)
 
-    equation = equation_type(inputs.shape[-1].value)
-    num_derivatives = len(equation.DERIVATIVE_ORDERS)
-
-    if grid is None:
-      grid = polynomials.regular_finite_difference_grid(
-          equation.GRID_OFFSET, derivative_order=0, accuracy_order=6)
-
-    if num_layers == 0:
+    if hparams.num_layers == 0:
       # TODO(shoyer): still use PolynomialAccuracyLayer here
       coefficients = tf.get_variable(
           'coefficients', (num_derivatives, grid.size))
@@ -241,12 +217,12 @@ def predict_coefficients(inputs: tf.Tensor,
     net = inputs[:, :, tf.newaxis]
     net = tf.layers.batch_normalization(net, training=training)
 
-    for _ in range(num_layers - 1):
-      net = layers.conv1d_periodic_layer(net, filters=filter_size,
+    for _ in range(hparams.num_layers - 1):
+      net = layers.conv1d_periodic_layer(net, filters=hparams.filter_size,
                                          kernel_size=3, activation=tf.nn.relu,
                                          center=True)
 
-    if not polynomial_accuracy_order:
+    if not hparams.polynomial_accuracy_order:
       net = layers.conv1d_periodic_layer(
           net, filters=num_derivatives*grid.size, kernel_size=3,
           activation=None, center=True)
@@ -254,21 +230,21 @@ def predict_coefficients(inputs: tf.Tensor,
       outputs = tf.reshape(net, tf.concat([tf.shape(inputs), new_dims], axis=0))
       outputs.set_shape(inputs.shape[:2].concatenate(new_dims))
 
-      if ensure_unbiased:
-        if 0 in equation.DERIVATIVE_ORDERS:
+      if hparams.ensure_unbiased_coefficients:
+        if 0 in equation_type.DERIVATIVE_ORDERS:
           raise ValueError('ensure_unbiased not yet supported for 0th order '
                            'spatial derivatives')
         outputs -= tf.reduce_mean(outputs, axis=-1, keepdims=True)
 
     else:
       poly_accuracy_layers = []
-      for derivative_order in equation.DERIVATIVE_ORDERS:
+      for derivative_order in equation_type.DERIVATIVE_ORDERS:
         poly_accuracy_layers.append(
             polynomials.PolynomialAccuracyLayer(
                 grid=grid,
                 derivative_order=derivative_order,
-                accuracy_order=polynomial_accuracy_order,
-                out_scale=polynomial_accuracy_scale)
+                accuracy_order=hparams.polynomial_accuracy_order,
+                out_scale=hparams.polynomial_accuracy_scale)
         )
       input_sizes = [layer.input_size for layer in poly_accuracy_layers]
 
@@ -323,27 +299,26 @@ def apply_coefficients(coefficients: tf.Tensor, inputs: tf.Tensor) -> tf.Tensor:
   return tf.einsum('bxdi,bxi->bxd', coefficients, patches)
 
 
-def predict_space_derivatives(inputs: tf.Tensor,
-                              equation_type: Type[equations.Equation],
-                              **kwargs: Any) -> tf.Tensor:
+def predict_space_derivatives(
+    inputs: tf.Tensor,
+    hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Infer normalized derivatives from inputs with our forward model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
-    **kwargs: passed on to predict_coefficients().
+    hparams: model hyperparameters.
 
   Returns:
     Float32 Tensor with dimensions [batch, x, derivative].
   """
-  coefficients = predict_coefficients(inputs, equation_type, **kwargs)
+  coefficients = predict_coefficients(inputs, hparams)
   return apply_coefficients(coefficients, inputs)
 
 
 def apply_space_derivatives(
     derivatives: tf.Tensor,
     inputs: tf.Tensor,
-    equation_type: Type[equations.Equation]) -> tf.Tensor:
+    hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Combine spatial derivatives with input to calculate time derivatives.
 
   Args:
@@ -351,35 +326,34 @@ def apply_space_derivatives(
       unnormalized spatial derivatives, e.g., as output from
       predict_derivatives() or center_finite_differences().
     inputs: float32 tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
+    hparams: model hyperparameters.
 
   Returns:
     Float32 Tensor with diensions [batch, x] giving the time derivatives for
     the given inputs and derivative model.
   """
+  equation_type = equations.from_hparams(hparams)
   equation = equation_type(inputs.shape[-1].value)
   derivatives_dict = {d: derivatives[..., i]
-                      for i, d in enumerate(equation_type.DERIVATIVE_ORDERS)}
+                      for i, d in enumerate(equation.DERIVATIVE_ORDERS)}
   return equation.equation_of_motion(inputs, derivatives_dict)
 
 
-def predict_time_derivative(inputs: tf.Tensor,
-                            equation_type: Type[equations.Equation],
-                            **kwargs: Any) -> tf.Tensor:
+def predict_time_derivative(
+    inputs: tf.Tensor,
+    hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Infer time evolution from inputs with our forward model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
-    **kwargs: passed on to predict_coefficients().
+    hparams: model hyperparameters.
 
   Returns:
     Float32 Tensor with dimensions [batch, x] with inferred time derivatives.
   """
   # TODO(shoyer): use a neural network to filter inputs, too.
-  space_derivatives = predict_space_derivatives(
-      inputs, equation_type, **kwargs)
-  return apply_space_derivatives(space_derivatives, inputs, equation_type)
+  space_derivatives = predict_space_derivatives(inputs, inputs)
+  return apply_space_derivatives(space_derivatives, inputs, hparams)
 
 
 def stack_space_time(space_derivatives: Union[tf.Tensor, List[tf.Tensor]],
@@ -400,23 +374,19 @@ def stack_space_time(space_derivatives: Union[tf.Tensor, List[tf.Tensor]],
 
 
 def predict_all_derivatives(inputs: tf.Tensor,
-                            equation_type: Type[equations.Equation],
-                            **kwargs: Any) -> tf.Tensor:
+                            hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Infer time evolution from inputs with our forward model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
-    **kwargs: passed on to predict_coefficients().
+    hparams: model hyperparameters.
 
   Returns:
     Float32 Tensor with dimensions [batch, x] with inferred time derivatives.
   """
   # TODO(shoyer): use a neural network to filter inputs, too.
-  space_derivatives = predict_space_derivatives(
-      inputs, equation_type, **kwargs)
-  time_derivative = apply_space_derivatives(
-      space_derivatives, inputs, equation_type)
+  space_derivatives = predict_space_derivatives(inputs, hparams)
+  time_derivative = apply_space_derivatives(space_derivatives, inputs, hparams)
   return stack_space_time(space_derivatives, time_derivative)
 
 
@@ -454,10 +424,7 @@ def loss_components(predictions: T,
 def calculate_loss(predictions: tf.Tensor,
                    labels: tf.Tensor,
                    baseline: tf.Tensor,
-                   error_scale: TensorLike = None,
-                   error_floor: TensorLike = 1e-7,
-                   relative_error_weight: float = 1e-6,
-                   time_derivative_weight: float = 1.0) -> tf.Tensor:
+                   hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Calculate loss for training.
 
   Args:
@@ -468,24 +435,15 @@ def calculate_loss(predictions: tf.Tensor,
     baseline: baseline derivatives computed with standard finite differences
       from low-resolution inputs, a float32 Tensor with dimensions [batch, x,
       derivative].
-    error_scale: array or tensor with dimensions [abs_rel, derivative]
-      indicating the scaling in the loss to use on squared error and relative
-      squared error for each derivative target.
-    error_floor: scalar or array with dimensions [derivative] added
-      to baseline squared error when normalizing relative error.
-    relative_error_weight: weighting on a scale of 0-1 to use for relative vs
-      absolute error.
-    time_derivative_weight: weighting on a scale of 0-1 to use for time vs space
-      derivatives.
+    hparams: model hyperparameters.
 
   Returns:
     Scalar float32 Tensor indicating the loss.
   """
-  if error_scale is None:
-    error_scale = tf.ones((2, labels.shape[-1].value))
+  error_scale = np.asarray(hparams.error_scale).reshape(2, -1)
 
   model_error, relative_error = loss_components(
-      predictions, labels, baseline, error_floor)
+      predictions, labels, baseline, hparams.error_floor)
 
   # dimensions [abs_rel, derivative]
   loss_per_head = tf.stack(
@@ -495,10 +453,10 @@ def calculate_loss(predictions: tf.Tensor,
 
   # dimensions [abs_rel, derivative]
   abs_rel_weights = tf.convert_to_tensor(
-      [1.0 - relative_error_weight, relative_error_weight])
+      [1.0 - hparams.relative_error_weight, hparams.relative_error_weight])
 
   # dimensions [derivative]
-  w_time = time_derivative_weight
+  w_time = hparams.time_derivative_weight
   num_space = labels.shape[-1].value - 1
   space_time_weights = tf.convert_to_tensor(
       [(1.0 - w_time) / num_space] * num_space + [w_time])

@@ -41,34 +41,33 @@ class IntegrateTest(parameterized.TestCase):
     self.checkpoint_dir = tempfile.mkdtemp(dir=FLAGS.test_tmpdir)
     self.model_kwargs = dict(num_layers=1, filter_size=32)
 
-  def train(self, equation_type):
+  def train(self, hparams):
     # train a model on random noise
     with tf.Graph().as_default():
-      training.training_loop(0.01 * np.random.RandomState(0).randn(500, 100),
-                             equation_type,
-                             self.checkpoint_dir,
-                             learning_rates=[1e-6],
-                             learning_stops=[10],
-                             **self.model_kwargs)
+      snapshots = 0.01 * np.random.RandomState(0).randn(500, 100)
+      training.training_loop(snapshots, self.checkpoint_dir, hparams)
 
   @parameterized.parameters(
-      {'equation_type': equations.BurgersEquation},
-      {'equation_type': equations.KdVEquation},
-      {'equation_type': equations.KSEquation},
-      {'equation_type': equations.ConservativeBurgersEquation},
-      {'equation_type': equations.ConservativeKdVEquation},
-      {'equation_type': equations.ConservativeKSEquation},
-      {'equation_type': equations.BurgersEquation, 'warmup': 1},
+      dict(equation='burgers'),
+      dict(equation='kdv'),
+      dict(equation='ks'),
+      dict(equation='burgers', conservative=True),
+      dict(equation='kdv', conservative=True),
+      dict(equation='ks', conservative=True),
+      dict(equation='burgers', warmup=1),
   )
-  def test_integrate_all(self, equation_type, warmup=0):
-    self.train(equation_type)
-    resample_factor = 4
+  def test_integrate_all(self, warmup=0, **hparam_values):
+    hparams = training.create_hparams(
+        learning_rates=[1e-3],
+        learning_stops=[20],
+        eval_interval=10,
+        **hparam_values)
+    self.train(hparams)
+
     results = integrate.integrate_all(
-        self.checkpoint_dir, equation_type,
+        self.checkpoint_dir,
         times=np.linspace(0, 1, num=11),
-        warmup=warmup,
-        resample_factor=resample_factor,
-        model_kwargs=self.model_kwargs)
+        warmup=warmup)
 
     self.assertIsInstance(results, xarray.Dataset)
     self.assertEqual(dict(results.dims),
@@ -83,7 +82,7 @@ class IntegrateTest(parameterized.TestCase):
         y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
 
     # all solutions should start with the same initial conditions
-    y_exact = results.y_exact.isel(time=0).values[::resample_factor]
+    y_exact = results.y_exact.isel(time=0).values[::hparams.resample_factor]
     np.testing.assert_allclose(
         y_exact, results.y_baseline.isel(time=0).values)
     np.testing.assert_allclose(

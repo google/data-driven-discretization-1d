@@ -40,25 +40,24 @@ class TrainingTest(parameterized.TestCase):
     self.tmpdir = tempfile.mkdtemp(dir=FLAGS.test_tmpdir)
 
   @parameterized.parameters(
-      {'equation_type': equations.BurgersEquation},
-      {'equation_type': equations.BurgersEquation,
-       'polynomial_accuracy_order': 0},
-      {'equation_type': equations.ConservativeBurgersEquation},
-      {'equation_type': equations.KdVEquation},
-      {'equation_type': equations.ConservativeKdVEquation},
-      {'equation_type': equations.KSEquation, 'grid': np.arange(9) - 4},
-      {'equation_type': equations.ConservativeKSEquation},
-      {'equation_type': equations.KSEquation, 'polynomial_accuracy_order': 0},
+      dict(equation='burgers'),
+      dict(equation='burgers', polynomial_accuracy_order=0),
+      dict(equation='burgers', conservative=True),
+      dict(equation='kdv'),
+      dict(equation='kdv', conservative=True),
+      dict(equation='ks', coefficient_grid_min_size=9),
+      dict(equation='ks', conservative=True),
+      dict(equation='ks', polynomial_accuracy_order=0),
   )
-  def test_training_loop(self, equation_type, **kwargs):
+  def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():
       snapshots = np.random.RandomState(0).randn(500, 100)
-      results = training.training_loop(
-          snapshots, equation_type, self.tmpdir,
+      hparams = training.create_hparams(
           learning_rates=[1e-3],
           learning_stops=[20],
           eval_interval=10,
-          **kwargs)
+          **hparam_values)
+      results = training.training_loop(snapshots, self.tmpdir, hparams)
       self.assertIsInstance(results, pd.DataFrame)
       self.assertEqual(results.shape[0], 2)
 

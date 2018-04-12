@@ -19,7 +19,7 @@ from __future__ import print_function
 
 import numpy as np
 import tensorflow as tf
-from typing import Mapping, Tuple, TypeVar
+from typing import Mapping, Tuple, Type, TypeVar
 
 from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
 
@@ -288,3 +288,20 @@ CONSERVATIVE_EQUATION_TYPES = {
     'kdv': ConservativeKdVEquation,
     'ks': ConservativeKSEquation,
 }
+
+
+def from_hparams(hparams: tf.contrib.training.HParams) -> Type[Equation]:
+  """Get the equation type from HParams.
+
+  Args:
+    hparams: hyperparameters for training.
+
+  Returns:
+    Corresponding equation type.
+  """
+  if hparams.conservative:
+    types = CONSERVATIVE_EQUATION_TYPES
+  else:
+    types = EQUATION_TYPES
+  return types[hparams.equation]
+

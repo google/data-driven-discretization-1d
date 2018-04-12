@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import os.path
 
 from absl import logging
@@ -31,29 +32,121 @@ from pde_superresolution import equations  # pylint: disable=invalid-import-orde
 from pde_superresolution import model  # pylint: disable=invalid-import-order
 
 
+def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
+  """Create default hyper-parameters for training a model.
+
+  Hyper-parameters:
+    equation: name of the equation being solved.
+    conservative: boolean indicating whether to use the continuity preserving
+      variant of this equation or not.
+    resample_factor: integer factor by which to upscale from low to high
+      resolution. Must evenly divide the high resolution grid.
+    resample_method: string, either 'mean' or 'subsample'.
+    base_batch_size: base batch size. Scaled by resample_factor to compute the
+      batch size sized used in training. This ensures that models trained at
+      different resolutions uses the same number of data points per batch.
+    num_layers: integer number of conv1d layers to use for coefficient
+      prediction.
+    filter_size: inetger filter size for conv1d layers.
+    polynomial_accuracy_order: integer order of polynomial accuracy to enforce
+      by construction.
+    polynomial_accuracy_scale: float scaling on output from the polynomial
+      accuracy layer.
+    ensure_unbiased_coefficients: boolean indicating whether to ensure finite
+      difference constraints are unbiased. Only used if
+      polynomial_accuracy_order == 0.
+    coefficient_grid_min_size: integer minimum size of the grid used for finite
+      difference coefficients. The coefficient grid will be either this size or
+      one larger, if GRID_OFFSET is False,
+    relative_error_weight: float relative weighting for relative error term in
+      the loss.
+    time_derivative_weight: float relative weighting for time derivatives in the
+      loss.
+    learning_rates: List[float] giving constant learning rates to use with Adam.
+    learning_stops: List[int] giving global steps at which to move on to the
+      next learning rate or stop training.
+    frac_training: float fraction of the input dataset to use for training vs.
+      validation.
+    error_floor_quantile: float quantile to use for the error floor.
+    eval_interval: integer training step frequency at which to run evaluation.
+    error_scale: List[float] with length 2*num_channels indicating the
+      scaling in the loss to use on squared error and relative squared error
+      for each derivative target.
+    error_floor: List[float] with length num_channels giving the scale for
+      weighting of relative errors.
+
+  Args:
+    equation: lowercase string name of the equation to solve.
+    **kwargs: default hyper-parameter values to override.
+
+  Returns:
+    HParams object with all hyperparameter values.
+  """
+  hparams = tf.contrib.training.HParams(
+      equation=equation,
+      conservative=True,
+      resample_factor=4,
+      resample_method='subsample',
+      base_batch_size=128,
+      num_layers=3,
+      filter_size=128,
+      polynomial_accuracy_order=2,
+      polynomial_accuracy_scale=1.0,
+      ensure_unbiased_coefficients=False,
+      coefficient_grid_min_size=6,
+      relative_error_weight=1e-6,
+      time_derivative_weight=1.0,
+      learning_rates=[1e-3, 1e-4],
+      learning_stops=[20000, 40000],
+      frac_training=0.8,
+      error_floor_quantile=0.1,
+      eval_interval=250,
+  )
+  hparams.override_from_dict(kwargs)
+  return hparams
+
+
+def add_data_dependent_hparams(hparams, snapshots):
+  """Add data-dependent hyperparameters to hparams.
+
+  Added hyper-parameters:
+    error_scale: List[float] with length 2*num_channels indicating the
+      scaling in the loss to use on squared error and relative squared error
+      for each derivative target.
+    error_floor: List[float] with length num_channels giving the scale for
+      weighting of relative errors.
+
+  Args:
+    hparams: hyper-parameters for training. Will be modified by adding
+      'error_floor' and 'error_scale' entries (lists of float).
+    snapshots: np.ndarray with shape [examples, x] with high-resolution
+      training data.
+  """
+  error_floor, error_scale = determine_loss_scales(snapshots, hparams)
+  hparams.add_hparam('error_scale', error_scale.ravel().tolist())
+  hparams.add_hparam('error_floor', error_floor.tolist())
+
+
 def create_training_step(
     loss: tf.Tensor,
-    learning_rate_values: List[float],
-    learning_rate_boundaries: List[int]) -> tf.Tensor:
+    hparams: tf.contrib.training.HParams) -> tf.Tensor:
   """Create a training step operation for training our neural network.
 
   Args:
     loss: loss to optimize.
-    learning_rate_values: learning rate values to use with Adam.
-    learning_rate_boundaries: boundaries between learning rates, specified in
-      global steps.
+    hparams: hyperparameters for training.
 
   Returns:
     Tensor that runs a single step of training each time it is evaluated.
   """
   global_step = tf.train.get_or_create_global_step()
 
-  if learning_rate_boundaries:
+  if len(hparams.learning_rates) > 1:
     learning_rate = tf.train.piecewise_constant(
-        global_step, boundaries=learning_rate_boundaries,
-        values=learning_rate_values)
+        global_step, boundaries=hparams.learning_stops[:-1],
+        values=hparams.learning_rates)
   else:
-    (learning_rate,) = learning_rate_values
+    (learning_rate,) = hparams.learning_rates
 
   optimizer = tf.train.AdamOptimizer(learning_rate, beta2=0.99)
 
@@ -65,57 +158,28 @@ def create_training_step(
 
 
 def setup_training(snapshots: np.ndarray,
-                   equation_type: Type[equations.Equation],
-                   error_scale: np.ndarray,
-                   error_floor: np.ndarray,
-                   batch_size: int = 512,
-                   factor: int = 4,
-                   learning_rate_values: List[float] = None,
-                   learning_rate_boundaries: List[int] = None,
-                   relative_error_weight: float = 1e-6,
-                   time_derivative_weight: float = 1.0,
-                   **kwargs: Any) -> Tuple[tf.Tensor, tf.Tensor]:
+                   hparams: tf.contrib.training.HParams
+                  ) -> Tuple[tf.Tensor, tf.Tensor]:
   """Create Tensors for training.
 
   Args:
     snapshots: np.ndarray with shape [examples, x] with high-resolution
       training data.
-    equation_type: type of equation being solved.
-    error_scale: array with dimensions [2, derivative] indicating the
-      scaling in the loss to use on squared error and relative squared error for
-      each derivative target.
-    error_floor: numpy array with scale for weighting of relative errors.
-    batch_size: integer batch size.
-    factor: factor by which to do resampling.
-    learning_rate_values: learning rate values to use with Adam.
-    learning_rate_boundaries: boundaries between learning rates, specified in
-      global steps.
-    relative_error_weight: weighting on a scale of 0-1 to use for relative vs
-      absolute error in the loss.
-    time_derivative_weight: weighting on a scale of 0-1 to use for time vs space
-      derivatives in the loss.
-    **kwargs: passed onto model.predict_all_derivatives().
+    hparams: hyperparameters for training.
 
   Returns:
     Tensors for the current loss, and for taking a training step.
   """
-  dataset = model.make_dataset(
-      snapshots, equation_type, batch_size=batch_size, factor=factor)
+  dataset = model.make_dataset(snapshots, hparams)
   tensors = dataset.make_one_shot_iterator().get_next()
 
-  derivatives = model.predict_all_derivatives(
-      tensors['inputs'], equation_type, **kwargs)
+  derivatives = model.predict_all_derivatives(tensors['inputs'], hparams)
 
   loss = model.calculate_loss(derivatives,
                               labels=tensors['labels'],
                               baseline=tensors['baseline'],
-                              error_scale=error_scale,
-                              error_floor=error_floor,
-                              relative_error_weight=relative_error_weight,
-                              time_derivative_weight=time_derivative_weight)
-  train_step = create_training_step(
-      loss, learning_rate_values=learning_rate_values,
-      learning_rate_boundaries=learning_rate_boundaries)
+                              hparams=hparams)
+  train_step = create_training_step(loss, hparams)
 
   return loss, train_step
 
@@ -128,54 +192,33 @@ class Inferer(object):
 
   def __init__(self,
                snapshots: np.ndarray,
-               equation_type: Type[equations.Equation],
-               error_scale: np.ndarray,
-               error_floor: np.ndarray,
-               batch_size: int = 512,
-               factor: int = 4,
-               training: bool = False,
-               relative_error_weight: float = 1e-6,
-               time_derivative_weight: float = 1.0,
-               **kwargs: Any):
+               hparams: tf.contrib.training.HParams,
+               training: bool = False):
     """Initialize an object for running inference.
 
     Args:
       snapshots: np.ndarray with shape [examples, x] with high-resolution
         training data.
-      equation_type: type of equation being solved.
-      error_scale: array with dimensions [2, derivative] indicating the
-        scaling in the loss to use on squared error and relative squared error
-        for each derivative target.
-      error_floor: numpy array with scale for weighting of relative errors.
-      batch_size: integer batch size.
-      factor: factor by which to do resampling.
+      hparams: hyperparameters for training.
       training: whether to evaluate on training or validation datasets.
-      relative_error_weight: weighting to use for relative error in the loss.
-      time_derivative_weight: weighting on a scale of 0-1 to use for time vs
-        space derivatives in the loss.
-      **kwargs: passed onto model.forward_model().
     """
-    dataset = model.make_dataset(snapshots, equation_type,
-                                 batch_size=batch_size, training=training,
-                                 repeat=False, factor=factor)
+    dataset = model.make_dataset(snapshots, hparams, training=training,
+                                 repeat=False)
     iterator = dataset.make_initializable_iterator()
     data = iterator.get_next()
 
     with tf.device('/cpu:0'):
       coefficients = model.predict_coefficients(
-          data['inputs'], equation_type, training=False, **kwargs)
+          data['inputs'], hparams, training=False)
       space_derivatives = model.apply_coefficients(coefficients, data['inputs'])
       time_derivative = model.apply_space_derivatives(
-          space_derivatives, data['inputs'], equation_type)
+          space_derivatives, data['inputs'], hparams)
       predictions = model.stack_space_time(space_derivatives, time_derivative)
 
       loss = model.calculate_loss(predictions,
                                   labels=data['labels'],
                                   baseline=data['baseline'],
-                                  error_scale=error_scale,
-                                  error_floor=error_floor,
-                                  relative_error_weight=relative_error_weight,
-                                  time_derivative_weight=time_derivative_weight)
+                                  hparams=hparams)
 
       results = dict(data, coefficients=coefficients, predictions=predictions)
       metrics = {k: tf.contrib.metrics.streaming_concat(v)
@@ -243,9 +286,7 @@ def load_dataset(dataset: tf.data.Dataset) -> Dict[str, np.ndarray]:
 
 def determine_loss_scales(
     snapshots: np.ndarray,
-    equation_type: Type[equations.Equation],
-    factor: int = 4,
-    quantile: float = 0.1) -> Tuple[np.ndarray, np.ndarray]:
+    hparams: tf.contrib.training.HParams) -> Tuple[np.ndarray, np.ndarray]:
   """Determine scale factors for the loss.
 
   When passed into model.compute_loss, predictions of all zero should result
@@ -254,9 +295,7 @@ def determine_loss_scales(
   Args:
     snapshots: np.ndarray with shape [examples, x] with high-resolution
       training data.
-    equation_type: type of equation being solved.
-    factor: factor by which to do resampling.
-    quantile: quantile to use for the error floor.
+    hparams: hyperparameters to use for training.
 
   Returns:
     Tuple of two numpy arrays:
@@ -265,13 +304,13 @@ def determine_loss_scales(
         for each derivative target.
       error_floor: numpy array with scale for weighting of relative errors.
   """
-  dataset = model.make_dataset(snapshots, equation_type, batch_size=512,
-                               training=True, repeat=False, factor=factor)
+  dataset = model.make_dataset(snapshots, hparams, training=True, repeat=False)
   data = load_dataset(dataset)
 
   baseline_error = (data['labels'] - data['baseline']) ** 2
+  percentile = 100 * hparams.error_floor_quantile
   error_floor = np.maximum(
-      np.percentile(baseline_error, 100 * quantile, axis=(0, 1)), 1e-12)
+      np.percentile(baseline_error, percentile, axis=(0, 1)), 1e-12)
 
   zero_predictions = np.zeros_like(data['labels'])
   components = np.stack(model.loss_components(predictions=zero_predictions,
@@ -394,57 +433,38 @@ def metrics_to_dataframe(
 
 
 def training_loop(snapshots: np.ndarray,
-                  equation_type: Type[equations.Equation],
                   checkpoint_dir: str,
-                  learning_rates: List[float],
-                  learning_stops: List[int],
-                  eval_interval: int = 250,
-                  resample_factor: int = 4,
-                  base_batch_size: int = 128,
-                  **kwargs: Any) -> pd.DataFrame:
+                  hparams: tf.contrib.training.HParams) -> pd.DataFrame:
   """Run training.
 
   Args:
     snapshots: np.ndarray with shape [examples, x] with high-resolution
       training data.
-    equation_type: type of equation being solved.
     checkpoint_dir: directory to which to save model checkpoints.
-    learning_rates: constant learning rates to use with Adam.
-    learning_stops: global steps at which to move on to the next learning rate
-      or stop training.
-    eval_interval: training step interval at which to run evaluation.
-    resample_factor: factor by which to upscale from low to high resolution.
-      Must evenly divide the high resolution grid.
-    base_batch_size: base batch size. Scaled by resample_factor to compute the
-      batch size sized used in training. This ensures that models trained at
-      different resolutions uses the same number of data points per batch.
-    **kwargs: keyword arguments describing the model passed on to
-      setup_training() and Inferer().
+    hparams: hyperparameters for training, as created by create_hparams().
 
   Returns:
     pd.DataFrame with metrics for the full training run.
   """
-  error_floor, error_scale = determine_loss_scales(
-      snapshots, equation_type, factor=resample_factor)
-  kwargs.update({
-      'batch_size': base_batch_size * resample_factor,
-      'error_floor': error_floor,
-      'error_scale': error_scale,
-      'factor': resample_factor,
-  })
-  logging.info('Training with parameters: %r', kwargs)
+  hparams = copy.deepcopy(hparams)
+  add_data_dependent_hparams(hparams, snapshots)
+  logging.info('Training with hyperparameters:\n%r', hparams)
 
-  _, train_step = setup_training(snapshots, equation_type,
-                                 learning_rate_values=learning_rates,
-                                 learning_rate_boundaries=learning_stops[:-1],
-                                 **kwargs)
-  train_inferer = Inferer(snapshots, equation_type, training=True, **kwargs)
-  test_inferer = Inferer(snapshots, equation_type, training=False, **kwargs)
+  hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')
+  with tf.gfile.GFile(hparams_path, 'w') as f:
+    f.write(str(hparams.to_proto()))
+
+  logging.info('Setting up training')
+  _, train_step = setup_training(snapshots, hparams)
+  train_inferer = Inferer(snapshots, hparams, training=True)
+  test_inferer = Inferer(snapshots, hparams, training=False)
+
   global_step = tf.train.get_or_create_global_step()
 
   logging.info('Variables: %s', '\n'.join(map(str, tf.trainable_variables())))
 
   logged_metrics = []
+  equation_type = equations.from_hparams(hparams)
 
   with tf.train.MonitoredTrainingSession(
       checkpoint_dir=checkpoint_dir,
@@ -459,10 +479,10 @@ def training_loop(snapshots: np.ndarray,
     initial_step = sess.run(global_step)
 
     with test_writer, train_writer:
-      for step in range(initial_step, learning_stops[-1]):
+      for step in range(initial_step, hparams.learning_stops[-1]):
         sess.run(train_step)
 
-        if (step + 1) % eval_interval == 0:
+        if (step + 1) % hparams.eval_interval == 0:
           train_inference_data = train_inferer.run(sess)
           test_inference_data = test_inferer.run(sess)
 

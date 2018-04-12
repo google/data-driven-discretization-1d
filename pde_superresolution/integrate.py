@@ -17,11 +17,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
+
 from absl import logging
+from google.protobuf import text_format
+from tensorflow.contrib.training.python.training import hparam_pb2
 import numpy as np
 import scipy.integrate
 import tensorflow as tf
-from typing import Dict, Mapping, Type
+from typing import Dict
 import xarray
 
 from pde_superresolution import equations  # pylint: disable=invalid-import-order
@@ -44,13 +48,13 @@ class SavedModelDifferentiator(Differentiator):
   def __init__(self,
                checkpoint_dir: str,
                equation: equations.Equation,
-               **kwargs):
+               hparams: tf.contrib.training.HParams):
 
     with tf.Graph().as_default():
       self.inputs = tf.placeholder(tf.float32, shape=(equation.num_points,))
       derivative_orders = equation.DERIVATIVE_ORDERS
       raw_preds = tf.squeeze(model.predict_space_derivatives(
-          self.inputs[tf.newaxis, :], type(equation), **kwargs), axis=0)
+          self.inputs[tf.newaxis, :], hparams), axis=0)
       self.predictions = {d: raw_preds[..., i]
                           for i, d in enumerate(derivative_orders)}
       saver = tf.train.Saver()
@@ -122,18 +126,25 @@ def odeint(equation: equations.Equation,
   return y
 
 
+def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
+  """Load hyperparameters saved by training.py."""
+  hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')
+  hparam_def = hparam_pb2.HParamDef()
+  with tf.gfile.GFile(hparams_path, 'r') as f:
+    text_format.Merge(f.read(), hparam_def)
+  return tf.contrib.training.HParams(hparam_def)
+
+
 def integrate_all(checkpoint_dir: str,
-                  equation_type: Type[equations.Equation],
                   random_seed: int = 0,
                   exact_num_x_points: int = 400,
                   times: np.ndarray = np.linspace(0, 10, num=201),
                   warmup: float = 0,
-                  resample_factor: int = 4,
-                  integrate_method: str = 'RK23',
-                  model_kwargs: Mapping = None) -> xarray.Dataset:
+                  integrate_method: str = 'RK23') -> xarray.Dataset:
   """Integrate the given PDE with standard and modeled finite differences."""
+  hparams = load_hparams(checkpoint_dir)
 
-  logging.info('integrating %s with seed=%s', equation_type, random_seed)
+  logging.info('integrating %s with seed=%s', hparams.equation, random_seed)
 
   if warmup:
     times = times + warmup  # pylint: disable=g-no-augmented-assignment
@@ -141,12 +152,10 @@ def integrate_all(checkpoint_dir: str,
   else:
     exact_times = times
 
-  if model_kwargs is None:
-    model_kwargs = {}
-
+  equation_type = equations.from_hparams(hparams)
   equation_high = equation_type(exact_num_x_points, random_seed=random_seed)
   equation_low = equation_type(
-      exact_num_x_points // resample_factor, random_seed=random_seed)
+      exact_num_x_points // hparams.resample_factor, random_seed=random_seed)
 
   logging.info('solving baseline model at high resolution')
   differentiator = BaselineDifferentiator(equation_high)
@@ -155,7 +164,7 @@ def integrate_all(checkpoint_dir: str,
 
   if warmup:
     # use the sample after warmup to initialize later simulations
-    y0 = solution_exact[1, ::resample_factor]
+    y0 = solution_exact[1, ::hparams.resample_factor]
     solution_exact = solution_exact[1:, :]
   else:
     y0 = None
@@ -168,7 +177,7 @@ def integrate_all(checkpoint_dir: str,
   logging.info('solving neural network model at low resolution')
   checkpoint_path = training.checkpoint_dir_to_path(checkpoint_dir)
   differentiator = SavedModelDifferentiator(
-      checkpoint_path, equation_low, **model_kwargs)
+      checkpoint_path, equation_low, hparams)
   solution_model = odeint(equation_low, differentiator, times, y0=y0,
                           method=integrate_method)
 
