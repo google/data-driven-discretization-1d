@@ -39,16 +39,21 @@ class TrainingTest(parameterized.TestCase):
   def setUp(self):
     self.tmpdir = tempfile.mkdtemp(dir=FLAGS.test_tmpdir)
 
+  extra_testcases = []
+  for equation in ['burgers', 'kdv', 'ks']:
+    for conservative in [True, False]:
+      for num_time_steps in [0, 1]:
+        extra_testcases.append({
+            'equation': equation,
+            'conservative': conservative,
+            'num_time_steps': num_time_steps,
+        })
+
   @parameterized.parameters(
-      dict(equation='burgers'),
       dict(equation='burgers', polynomial_accuracy_order=0),
-      dict(equation='burgers', conservative=True),
-      dict(equation='kdv'),
-      dict(equation='kdv', conservative=True),
       dict(equation='ks', coefficient_grid_min_size=9),
-      dict(equation='ks', conservative=True),
       dict(equation='ks', polynomial_accuracy_order=0),
-  )
+      *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():
       snapshots = np.random.RandomState(0).randn(500, 100)

@@ -35,16 +35,15 @@ from pde_superresolution import model  # pylint: disable=invalid-import-order
 def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
   """Create default hyper-parameters for training a model.
 
-  Hyper-parameters:
+  Dataset parameters:
     equation: name of the equation being solved.
     conservative: boolean indicating whether to use the continuity preserving
       variant of this equation or not.
     resample_factor: integer factor by which to upscale from low to high
       resolution. Must evenly divide the high resolution grid.
     resample_method: string, either 'mean' or 'subsample'.
-    base_batch_size: base batch size. Scaled by resample_factor to compute the
-      batch size sized used in training. This ensures that models trained at
-      different resolutions uses the same number of data points per batch.
+
+  Neural network parameters:
     num_layers: integer number of conv1d layers to use for coefficient
       prediction.
     filter_size: inetger filter size for conv1d layers.
@@ -58,22 +57,37 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
     coefficient_grid_min_size: integer minimum size of the grid used for finite
       difference coefficients. The coefficient grid will be either this size or
       one larger, if GRID_OFFSET is False,
-    relative_error_weight: float relative weighting for relative error term in
-      the loss.
-    time_derivative_weight: float relative weighting for time derivatives in the
-      loss.
+
+  Training parameters:
+    base_batch_size: base batch size. Scaled by resample_factor to compute the
+      batch size sized used in training. This ensures that models trained at
+      different resolutions uses the same number of data points per batch.
     learning_rates: List[float] giving constant learning rates to use with Adam.
     learning_stops: List[int] giving global steps at which to move on to the
       next learning rate or stop training.
     frac_training: float fraction of the input dataset to use for training vs.
       validation.
-    error_floor_quantile: float quantile to use for the error floor.
     eval_interval: integer training step frequency at which to run evaluation.
+
+  Loss parameters:
+    num_time_steps: integer number of integration time steps to include in the
+      loss.
+    error_floor_quantile: float quantile to use for the error floor.
     error_scale: List[float] with length 2*num_channels indicating the
       scaling in the loss to use on squared error and relative squared error
       for each derivative target.
     error_floor: List[float] with length num_channels giving the scale for
       weighting of relative errors.
+    relative_error_weight: float relative weighting for absolute error term in
+      the loss.
+    relative_error_weight: float relative weighting for relative error term in
+      the loss.
+    space_derivatives_weight: float relative weighting for space derivatives in
+      the loss.
+    time_derivative_weight: float relative weighting for time derivatives in the
+      loss.
+    integrated_solution_weight: float relative weighting for the integrated
+      solution in the loss.
 
   Args:
     equation: lowercase string name of the equation to solve.
@@ -83,24 +97,34 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
     HParams object with all hyperparameter values.
   """
   hparams = tf.contrib.training.HParams(
+      # dataset parameters
       equation=equation,
       conservative=True,
       resample_factor=4,
       resample_method='subsample',
-      base_batch_size=128,
+      # neural network parameters
       num_layers=3,
       filter_size=128,
       polynomial_accuracy_order=2,
       polynomial_accuracy_scale=1.0,
       ensure_unbiased_coefficients=False,
       coefficient_grid_min_size=6,
-      relative_error_weight=1e-6,
-      time_derivative_weight=1.0,
+      # training parameters
+      base_batch_size=128,
       learning_rates=[1e-3, 1e-4],
       learning_stops=[20000, 40000],
       frac_training=0.8,
-      error_floor_quantile=0.1,
       eval_interval=250,
+      # loss parameters
+      num_time_steps=0,
+      error_floor_quantile=0.1,
+      # error_scale is set by add_data_dependent_hparams
+      # error_floor is set by add_data_dependent_hparams
+      absolute_error_weight=1.0,
+      relative_error_weight=0.0,
+      space_derivatives_weight=1.0,
+      time_derivative_weight=1.0,
+      integrated_solution_weight=1.0,
   )
   hparams.override_from_dict(kwargs)
   return hparams
@@ -173,12 +197,13 @@ def setup_training(snapshots: np.ndarray,
   dataset = model.make_dataset(snapshots, hparams)
   tensors = dataset.make_one_shot_iterator().get_next()
 
-  derivatives = model.predict_all_derivatives(tensors['inputs'], hparams)
+  predictions = model.predict_result(tensors['inputs'], hparams)
 
-  loss = model.calculate_loss(derivatives,
-                              labels=tensors['labels'],
-                              baseline=tensors['baseline'],
-                              hparams=hparams)
+  loss_per_head = model.loss_per_head(predictions,
+                                      labels=tensors['labels'],
+                                      baseline=tensors['baseline'],
+                                      hparams=hparams)
+  loss = model.weighted_loss(loss_per_head, hparams)
   train_step = create_training_step(loss, hparams)
 
   return loss, train_step
@@ -207,23 +232,39 @@ class Inferer(object):
     iterator = dataset.make_initializable_iterator()
     data = iterator.get_next()
 
+    equation_type = equations.from_hparams(hparams)
+
     with tf.device('/cpu:0'):
-      coefficients = model.predict_coefficients(
-          data['inputs'], hparams, training=False)
+      coefficients = model.predict_coefficients(data['inputs'], hparams)
       space_derivatives = model.apply_coefficients(coefficients, data['inputs'])
       time_derivative = model.apply_space_derivatives(
-          space_derivatives, data['inputs'], hparams)
-      predictions = model.stack_space_time(space_derivatives, time_derivative)
+          space_derivatives, data['inputs'], equation_type)
+      if hparams.num_time_steps:
+        integrated_solution = model.predict_time_evolution(
+            data['inputs'], hparams)
+      else:
+        integrated_solution = None
+      predictions = model.result_stack(space_derivatives, time_derivative,
+                                       integrated_solution)
 
-      loss = model.calculate_loss(predictions,
-                                  labels=data['labels'],
-                                  baseline=data['baseline'],
-                                  hparams=hparams)
+      loss_per_head = model.loss_per_head(
+          predictions,
+          labels=data['labels'],
+          baseline=data['baseline'],
+          hparams=hparams)
+      loss = model.weighted_loss(loss_per_head, hparams)
 
       results = dict(data, coefficients=coefficients, predictions=predictions)
       metrics = {k: tf.contrib.metrics.streaming_concat(v)
                  for k, v in results.items()}
       metrics['loss'] = tf.metrics.mean(loss)
+
+      space_loss, time_loss, integrated_loss = model.result_unstack(
+          loss_per_head, equation_type)
+      metrics['loss/space_derivatives'] = tf.metrics.mean(space_loss)
+      metrics['loss/time_derivative'] = tf.metrics.mean(time_loss)
+      if integrated_loss is not None:
+        metrics['loss/integrated_solution'] = tf.metrics.mean(integrated_loss)
 
       initializer = tf.group(iterator.initializer,
                              tf.local_variables_initializer())
@@ -312,11 +353,22 @@ def determine_loss_scales(
   error_floor = np.maximum(
       np.percentile(baseline_error, percentile, axis=(0, 1)), 1e-12)
 
-  zero_predictions = np.zeros_like(data['labels'])
-  components = np.stack(model.loss_components(predictions=zero_predictions,
-                                              labels=data['labels'],
-                                              baseline=data['baseline'],
-                                              error_floor=error_floor))
+  # predict zero for all derivatives, and a constant value for the integrated
+  # solution over time.
+  equation_type = equations.from_hparams(hparams)
+  num_zero_predictions = len(equation_type.DERIVATIVE_ORDERS) + 1
+  labels_shape = data['labels'].shape
+  predictions = np.concatenate([
+      np.zeros(labels_shape[:-1] + (num_zero_predictions,)),
+      np.repeat(data['inputs'][..., np.newaxis],
+                labels_shape[-1] - num_zero_predictions,
+                axis=-1)
+  ], axis=-1)
+
+  components = np.stack(model.abs_and_rel_error(predictions=predictions,
+                                                labels=data['labels'],
+                                                baseline=data['baseline'],
+                                                error_floor=error_floor))
   baseline_error = np.mean(components, axis=(1, 2))
   logging.info('baseline_error: %s', baseline_error)
 
@@ -361,13 +413,11 @@ def calculate_metrics(
       (data['labels'] - data['predictions']) ** 2
       < (data['labels'] - data['baseline']) ** 2, axis=(0, 1))
 
-  metrics = {
-      'loss': float(data['loss']),
-      'count': len(data['labels']),
-  }
+  metrics = {'count': len(data['labels'])}
+  metrics.update({k: float(v) for k, v in data.items() if 'loss' in k})
   target_names = ['y_' + 'x' * order
                   for order in equation_type.DERIVATIVE_ORDERS] + ['y_t']
-  assert data['labels'].shape[-1] == len(target_names)
+  assert data['labels'].shape[-1] >= len(target_names)
   for i, target in enumerate(target_names):
     metrics.update({
         'mae/' + target: mae[i],
@@ -375,15 +425,27 @@ def calculate_metrics(
         'mean_abs_relative_error/' + target: mean_abs_relative_error[i],
         'frac_below_baseline/' + target: below_baseline[i],
     })
+  time_index = len(target_names)
+  if time_index < data['labels'].shape[-1]:
+    target = 'y(t)'
+    metrics.update({
+        'mae/' + target: mae[time_index:].mean(),
+        'rms_error/' + target: rms_error[time_index:].mean(),
+        'mean_abs_relative_error/' + target:
+            mean_abs_relative_error[time_index:].mean(),
+        'frac_below_baseline/' + target: below_baseline[time_index:].mean(),
+    })
   return metrics
 
 
 def metrics_one_linear(metrics: Dict[str, float]) -> str:
   """Summarize training metrics into a one line string."""
 
-  def matching_metrics_string(like, style='{:1.4f}', delimiter='/'):
-    values = [v for k, v in sorted(metrics.items()) if like in k]
-    return delimiter.join(style.format(v) for v in values)
+  def matching_metrics_string(like, style='{}={:1.4f}', delimiter='/'):
+    values = [(k.split('/')[-1], v)
+              for k, v in sorted(metrics.items())
+              if like in k]
+    return delimiter.join(style.format(*kv) for kv in values)
 
   return ('loss: {:1.7f}, abs_error: {}, rel_error: {}, below_baseline: {}'
           .format(metrics['loss'],
@@ -434,7 +496,8 @@ def metrics_to_dataframe(
 
 def training_loop(snapshots: np.ndarray,
                   checkpoint_dir: str,
-                  hparams: tf.contrib.training.HParams) -> pd.DataFrame:
+                  hparams: tf.contrib.training.HParams,
+                  master: str = '') -> pd.DataFrame:
   """Run training.
 
   Args:
@@ -467,6 +530,7 @@ def training_loop(snapshots: np.ndarray,
   equation_type = equations.from_hparams(hparams)
 
   with tf.train.MonitoredTrainingSession(
+      master=master,
       checkpoint_dir=checkpoint_dir,
       save_checkpoint_secs=300,
       hooks=[SaveAtEnd(checkpoint_dir_to_path(checkpoint_dir))]) as sess:

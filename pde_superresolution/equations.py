@@ -59,6 +59,16 @@ class Equation(object):
     """Initial condition for time integration."""
     raise NotImplementedError
 
+  @property
+  def time_step(self) -> float:
+    """Time step size to use with explicit integration (the midpoint rule)."""
+    raise NotImplementedError
+
+  @property
+  def standard_deviation(self) -> float:
+    """Empricial standard deviation for integrated solutions."""
+    raise NotImplementedError
+
   def equation_of_motion(
       self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
     """Time derivatives of the state `y` for integration.
@@ -136,6 +146,16 @@ class BurgersEquation(Equation):
   def initial_value(self) -> np.ndarray:
     return np.zeros_like(self.x)
 
+  @property
+  def time_step(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 3e-3
+
+  @property
+  def standard_deviation(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 1.300
+
   def equation_of_motion(
       self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
     y_x = spatial_derivatives[1]
@@ -159,10 +179,10 @@ def _fixed_first_derivative(y: T, dx: float) -> T:
   Returns:
     Differentiated array, same type and shape as `y`.
   """
-  roll = np.roll if isinstance(y, np.ndarray) else tf.manip.roll
-  # Note: we can't use negative axes in roll due to
-  # https://github.com/tensorflow/tensorflow/issues/17877
-  y_forward = roll(y, -1, axis=len(y.shape)-1)
+  # Use concat instead of roll because roll doesn't have GPU or TPU
+  # implementations in TensorFlow
+  concat = np.concatenate if isinstance(y, np.ndarray) else tf.concat
+  y_forward = concat([y[..., 1:], y[..., :1]], axis=-1)
   return (1 / dx) * (y_forward - y)
 
 
@@ -197,6 +217,16 @@ class KdVEquation(Equation):
 
   def initial_value(self) -> np.ndarray:
     return self.forcing(0, self.x)
+
+  @property
+  def time_step(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 3e-4
+
+  @property
+  def standard_deviation(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 0.594
 
   def equation_of_motion(
       self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
@@ -244,6 +274,16 @@ class KSEquation(Equation):
                random_seed: int = 0):
     self.forcing = RandomForcing(nparams=10, seed=random_seed, period=period)
     super(KSEquation, self).__init__(num_points, period, random_seed)
+
+  @property
+  def time_step(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 3e-4
+
+  @property
+  def standard_deviation(self) -> float:
+    # TODO(shoyer): pick this dynamically
+    return 0.299
 
   def initial_value(self) -> np.ndarray:
     return self.forcing(0, self.x)

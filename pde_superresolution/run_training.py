@@ -38,7 +38,7 @@ flags.DEFINE_string(
 flags.DEFINE_string(
     'input_path', None,
     'Path to HDF5 file with input data.')
-flags.DEFINE_string(
+flags.DEFINE_enum(
     'equation', None, list(equations.EQUATION_TYPES),
     'Equation to integrate.')
 flags.DEFINE_string(
@@ -75,7 +75,8 @@ def main(unused_argv):
   hparams.parse(FLAGS.hparams)
 
   logging.info('Starting training loop')
-  metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir, hparams)
+  metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir, hparams,
+                                      master='local')
 
   if FLAGS.checkpoint_dir:
     logging.info('Saving CSV with metrics')
