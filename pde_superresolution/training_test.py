@@ -53,6 +53,7 @@ class TrainingTest(parameterized.TestCase):
       dict(equation='burgers', polynomial_accuracy_order=0),
       dict(equation='ks', coefficient_grid_min_size=9),
       dict(equation='ks', polynomial_accuracy_order=0),
+      dict(equation='burgers', resample_method='mean'),
       *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():

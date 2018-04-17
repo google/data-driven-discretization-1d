@@ -49,18 +49,22 @@ def resample_mean(inputs: tf.Tensor, factor: int = 4) -> tf.Tensor:
   """Resample data to a lower-resolution with the mean.
 
   Args:
-    inputs: Tensor with dimensions [batch, x].
+    inputs: Tensor with dimensions [batch, x, ...].
     factor: integer factor by which to reduce the size of the x-dimension.
 
   Returns:
-    Tensor with dimensions [batch, x//factor].
+    Tensor with dimensions [batch, x//factor, ...].
 
   Raises:
     ValueError: if x is not evenly divided by factor.
   """
-  if len(inputs.shape) != 2 or inputs.shape[1].value % factor:
+  shape = inputs.shape.as_list()
+  if len(shape) not in {2, 3} or shape[1] % factor:
     raise ValueError('invalid input shape: {}'.format(inputs.shape))
-  reshaped = tf.reshape(inputs, [-1, inputs.shape[1].value // factor, factor])
+  new_shape = [-1, shape[1] // factor, factor]
+  if len(shape) == 3:
+    new_shape.append(shape[2])
+  reshaped = tf.reshape(inputs, new_shape)
   return tf.reduce_mean(reshaped, axis=2)
 
 
@@ -348,7 +352,8 @@ def predict_coefficients(inputs: tf.Tensor,
 
     grid = polynomials.regular_finite_difference_grid(
         equation.GRID_OFFSET, derivative_order=0,
-        accuracy_order=hparams.coefficient_grid_min_size)
+        accuracy_order=hparams.coefficient_grid_min_size,
+        dx=equation.dx)
 
     if hparams.num_layers == 0:
       # TODO(shoyer): still use PolynomialAccuracyLayer here
