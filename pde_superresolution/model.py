@@ -230,6 +230,13 @@ def result_unstack(
   return (space_derivatives, time_derivative, integrated_solution)
 
 
+def _stack_all_rolls(inputs: tf.Tensor, max_offset: int) -> tf.Tensor:
+  """Stack together all rolls of inputs, from 0 to max_offset."""
+  rolled = [tf.concat([inputs[i:, ...], inputs[:i, ...]], axis=0)
+            for i in range(max_offset)]
+  return tf.stack(rolled, axis=0)
+
+
 def baseline_result(inputs: tf.Tensor,
                     equation_type: Type[equations.Equation],
                     num_time_steps: int = 0) -> tf.Tensor:
@@ -317,9 +324,12 @@ def make_dataset(snapshots: np.ndarray,
   indexer = slice(None, num_training) if training else slice(num_training, None)
 
   dataset = tf.data.Dataset.from_tensor_slices(snapshots[indexer])
+  dataset = dataset.map(lambda x: _stack_all_rolls(x, hparams.resample_factor))
+  dataset = dataset.apply(tf.contrib.data.unbatch())
+
   if repeat:
-    dataset = dataset.shuffle(buffer_size=10000)
-    dataset = dataset.repeat()
+    dataset = dataset.apply(
+        tf.contrib.data.shuffle_and_repeat(buffer_size=10000))
 
   batch_size = hparams.base_batch_size * hparams.resample_factor
   dataset = dataset.batch(batch_size)
