@@ -46,6 +46,9 @@ flags.DEFINE_string(
     'Additional hyper-parameter values to use, in the form of a '
     'comma-separated list of name=value pairs, e.g., '
     '"num_layers=3,filter_size=64".')
+flags.DEFINE_string(
+    'master', '',
+    'Master to use with TensorFlow.')
 
 
 FLAGS = flags.FLAGS
@@ -76,7 +79,7 @@ def main(unused_argv):
 
   logging.info('Starting training loop')
   metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir, hparams,
-                                      master='local')
+                                      master=FLAGS.master)
 
   if FLAGS.checkpoint_dir:
     logging.info('Saving CSV with metrics')
