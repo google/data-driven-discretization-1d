@@ -132,7 +132,9 @@ def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
   hparam_def = hparam_pb2.HParamDef()
   with tf.gfile.GFile(hparams_path, 'r') as f:
     text_format.Merge(f.read(), hparam_def)
-  return tf.contrib.training.HParams(hparam_def)
+  hparams = tf.contrib.training.HParams(hparam_def)
+  # Set any new hparams not found in the file with default values.
+  return training.create_hparams(**hparams.values())
 
 
 def integrate_all(checkpoint_dir: str,

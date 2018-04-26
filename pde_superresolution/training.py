@@ -105,6 +105,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       # neural network parameters
       num_layers=3,
       filter_size=128,
+      kernel_size=3,
+      nonlinearity='relu',
       polynomial_accuracy_order=2,
       polynomial_accuracy_scale=1.0,
       ensure_unbiased_coefficients=False,
@@ -118,8 +120,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       # loss parameters
       num_time_steps=0,
       error_floor_quantile=0.1,
-      # error_scale is set by add_data_dependent_hparams
-      # error_floor is set by add_data_dependent_hparams
+      error_scale=[np.nan],  # set by set_data_dependent_hparams
+      error_floor=[np.nan],  # set by set_data_dependent_hparams
       absolute_error_weight=1.0,
       relative_error_weight=0.0,
       space_derivatives_weight=1.0,
@@ -130,7 +132,7 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
   return hparams
 
 
-def add_data_dependent_hparams(hparams, snapshots):
+def set_data_dependent_hparams(hparams, snapshots):
   """Add data-dependent hyperparameters to hparams.
 
   Added hyper-parameters:
@@ -147,8 +149,8 @@ def add_data_dependent_hparams(hparams, snapshots):
       training data.
   """
   error_floor, error_scale = determine_loss_scales(snapshots, hparams)
-  hparams.add_hparam('error_scale', error_scale.ravel().tolist())
-  hparams.add_hparam('error_floor', error_floor.tolist())
+  hparams.set_hparam('error_scale', error_scale.ravel().tolist())
+  hparams.set_hparam('error_floor', error_floor.tolist())
 
 
 def create_training_step(
@@ -505,12 +507,13 @@ def training_loop(snapshots: np.ndarray,
       training data.
     checkpoint_dir: directory to which to save model checkpoints.
     hparams: hyperparameters for training, as created by create_hparams().
+    master: string master to use for MonitoredTrainingSession.
 
   Returns:
     pd.DataFrame with metrics for the full training run.
   """
   hparams = copy.deepcopy(hparams)
-  add_data_dependent_hparams(hparams, snapshots)
+  set_data_dependent_hparams(hparams, snapshots)
   logging.info('Training with hyperparameters:\n%r', hparams)
 
   hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')

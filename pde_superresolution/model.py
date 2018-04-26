@@ -338,6 +338,15 @@ def make_dataset(snapshots: np.ndarray,
   return dataset
 
 
+_NONLINEARITIES = {
+    'relu': tf.nn.relu,
+    'relu6': tf.nn.relu6,
+    'tanh': tf.tanh,
+    'softplus': tf.nn.softplus,
+    'elu': tf.nn.elu,
+}
+
+
 def predict_coefficients(inputs: tf.Tensor,
                          hparams: tf.contrib.training.HParams,
                          reuse: object = tf.AUTO_REUSE) -> tf.Tensor:
@@ -375,15 +384,17 @@ def predict_coefficients(inputs: tf.Tensor,
     net = inputs[:, :, tf.newaxis]
     net /= equation.standard_deviation
 
+    activation = _NONLINEARITIES[hparams.nonlinearity]
+
     for _ in range(hparams.num_layers - 1):
       net = layers.conv1d_periodic_layer(net, filters=hparams.filter_size,
-                                         kernel_size=3, activation=tf.nn.relu,
-                                         center=True)
+                                         kernel_size=hparams.kernel_size,
+                                         activation=activation, center=True)
 
     if not hparams.polynomial_accuracy_order:
       net = layers.conv1d_periodic_layer(
-          net, filters=num_derivatives*grid.size, kernel_size=3,
-          activation=None, center=True)
+          net, filters=num_derivatives*grid.size,
+          kernel_size=hparams.kernel_size, activation=None, center=True)
       new_dims = [num_derivatives, grid.size]
       outputs = tf.reshape(net, tf.concat([tf.shape(inputs), new_dims], axis=0))
       outputs.set_shape(inputs.shape[:2].concatenate(new_dims))
@@ -407,8 +418,8 @@ def predict_coefficients(inputs: tf.Tensor,
       input_sizes = [layer.input_size for layer in poly_accuracy_layers]
 
       net = layers.conv1d_periodic_layer(net, filters=sum(input_sizes),
-                                         kernel_size=3, activation=None,
-                                         center=True)
+                                         kernel_size=hparams.kernel_size,
+                                         activation=None, center=True)
 
       cum_sizes = np.cumsum(input_sizes)
       starts = [0] + cum_sizes[:-1].tolist()
