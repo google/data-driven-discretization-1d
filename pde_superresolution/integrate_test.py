@@ -44,7 +44,7 @@ class IntegrateTest(parameterized.TestCase):
   def train(self, hparams):
     # train a model on random noise
     with tf.Graph().as_default():
-      snapshots = 0.01 * np.random.RandomState(0).randn(500, 100)
+      snapshots = 0.01 * np.random.RandomState(0).randn(400, 100)
       training.training_loop(snapshots, self.checkpoint_dir, hparams)
 
   @parameterized.parameters(

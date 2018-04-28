@@ -19,7 +19,21 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
-from typing import Any
+from typing import Any, Union
+
+
+def static_or_dynamic_size(
+    tensor: tf.Tensor, axis: int) -> Union[int, tf.Tensor]:
+  """Return the size of a tensor dimension, as an integer if possible."""
+  try:
+    static_size = tensor.shape[axis].value
+  except IndexError:
+    raise ValueError('axis {} out of bounds for tensor with shape {}'
+                     .format(axis, tensor.shape))
+  if static_size is not None:
+    return static_size
+  else:
+    return tf.shape(tensor)[axis]
 
 
 def pad_periodic(inputs: tf.Tensor,
@@ -45,23 +59,27 @@ def pad_periodic(inputs: tf.Tensor,
   if len(inputs.shape) != 3:
     raise ValueError('inputs must be 3D for periodic padding')
 
-  num_x_points = inputs.shape[1].value
-  if num_x_points is not None and padding > num_x_points:
-    raise ValueError('cannot pad with multiple input copies')
-
   with tf.name_scope(name, 'pad_periodic', [inputs]) as scope:
     inputs = tf.convert_to_tensor(inputs, name='inputs')
 
     if padding == 0:
-      # avoid unnecessary copies, and allow assuming padding > 0
+      # allow assuming padding > 0
       return tf.identity(inputs, name=scope)
 
+    num_x_points = static_or_dynamic_size(inputs, axis=1)
     if center:
-      inputs_list = [inputs[:, -padding//2:, :],
-                     inputs,
-                     inputs[:, :padding//2, :]]
+      repeats = (padding // 2) // num_x_points
     else:
-      inputs_list = [inputs, inputs[:, :padding, :]]
+      repeats = padding // num_x_points
+    tiled_inputs = tf.tile(inputs, (1, 1 + repeats, 1))
+
+    if center:
+      inputs_list = [tiled_inputs[:, -padding//2:, :],
+                     inputs,
+                     tiled_inputs[:, :padding//2, :]]
+    else:
+      inputs_list = [inputs, tiled_inputs[:, :padding, :]]
+
     return tf.concat(inputs_list, axis=1, name=scope)
 
 
