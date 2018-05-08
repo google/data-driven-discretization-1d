@@ -25,7 +25,7 @@ import scipy.special
 import tensorflow as tf
 from typing import Tuple
 
-from pde_superresolution import layers  # pylint: disable=invalid-import-order
+from pde_superresolution import layers  # pylint: disable=g-bad-import-order
 
 
 class GridOffset(enum.Enum):

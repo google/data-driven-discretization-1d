@@ -21,14 +21,13 @@ from __future__ import print_function
 import tempfile
 
 from absl import flags
-from absl.testing import absltest
 from absl.testing import parameterized
+from absl.testing import absltest  # pylint: disable=g-bad-import-order
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import training  # pylint: disable=invalid-import-order
+from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
 FLAGS = flags.FLAGS
@@ -59,7 +58,7 @@ class TrainingTest(parameterized.TestCase):
       *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():
-      snapshots = np.random.RandomState(0).randn(400, 100)
+      snapshots = np.random.RandomState(0).randn(100, 400)
       hparams = training.create_hparams(
           learning_rates=[1e-3],
           learning_stops=[20],

@@ -18,12 +18,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from absl.testing import absltest
+from absl.testing import absltest  # pylint: disable=g-bad-import-order
 from absl.testing import parameterized
 import numpy as np
 import tensorflow as tf
 
-from pde_superresolution import layers  # pylint: disable=invalid-import-order
+from pde_superresolution import layers  # pylint: disable=g-bad-import-order
 
 
 def pad_periodic_1d(inputs, padding, center=False):

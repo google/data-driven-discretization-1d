@@ -20,24 +20,22 @@ from __future__ import print_function
 import os
 
 from absl import logging
-from google.protobuf import text_format
-from tensorflow.contrib.training.python.training import hparam_pb2
+from google.protobuf import text_format  # pylint: disable=g-bad-import-order
+from tensorflow.contrib.training.python.training import hparam_pb2  # pylint: disable=g-bad-import-order
 import numpy as np
 import scipy.integrate
 import tensorflow as tf
-from typing import Dict
 import xarray
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
-from pde_superresolution import model  # pylint: disable=invalid-import-order
-from pde_superresolution import training  # pylint: disable=invalid-import-order
+from pde_superresolution import equations  # pylint: disable=g-bad-import-order
+from pde_superresolution import model  # pylint: disable=g-bad-import-order
+from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
 class Differentiator(object):
-  """Base class for spatial differentiation."""
+  """Base class for calculating time derivatives."""
 
-  def __call__(self, y: np.ndarray) -> Dict[int, np.ndarray]:
+  def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
     """Calculate all desired spatial derivatives."""
     raise NotImplementedError
 
@@ -51,18 +49,21 @@ class SavedModelDifferentiator(Differentiator):
                hparams: tf.contrib.training.HParams):
 
     with tf.Graph().as_default():
-      self.inputs = tf.placeholder(tf.float32, shape=(equation.num_points,))
-      derivative_orders = equation.DERIVATIVE_ORDERS
-      raw_preds = tf.squeeze(model.predict_space_derivatives(
+      self.t = tf.placeholder(tf.float32, shape=())
+
+      num_points = equation.grid.solution_num_points
+      self.inputs = tf.placeholder(tf.float32, shape=(num_points,))
+
+      time_derivative = tf.squeeze(model.predict_time_derivative(
           self.inputs[tf.newaxis, :], hparams), axis=0)
-      self.predictions = {d: raw_preds[..., i]
-                          for i, d in enumerate(derivative_orders)}
+      self.value = equation.finalize_time_derivative(self.t, time_derivative)
+
       saver = tf.train.Saver()
       self.sess = tf.Session()
       saver.restore(self.sess, checkpoint_dir)
 
-  def __call__(self, y: np.ndarray) -> Dict[int, np.ndarray]:
-    return self.sess.run(self.predictions, feed_dict={self.inputs: y})
+  def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
+    return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
 
 
 class BaselineDifferentiator(Differentiator):
@@ -72,20 +73,23 @@ class BaselineDifferentiator(Differentiator):
                equation: equations.Equation):
 
     with tf.Graph().as_default():
-      self.inputs = tf.placeholder(tf.float32, shape=(equation.num_points,))
-      expanded_inputs = self.inputs[tf.newaxis, :]
+      self.t = tf.placeholder(tf.float32, shape=())
 
-      self.predictions = {}
-      for order in equation.DERIVATIVE_ORDERS:
-        grid = polynomials.regular_finite_difference_grid(
-            equation.GRID_OFFSET, order, dx=equation.dx)
-        self.predictions[order] = tf.squeeze(
-            polynomials.apply_finite_differences(expanded_inputs, grid, order),
-            axis=0)
+      num_points = equation.grid.solution_num_points
+      self.inputs = tf.placeholder(tf.float32, shape=(num_points,))
+
+      batched_inputs = self.inputs[tf.newaxis, :]
+      equation_type = type(equation)
+      space_derivatives = model.baseline_space_derivatives(
+          batched_inputs, equation_type)
+      time_derivative = tf.squeeze(model.apply_space_derivatives(
+          space_derivatives, batched_inputs, equation_type), axis=0)
+      self.value = equation.finalize_time_derivative(self.t, time_derivative)
+
       self.sess = tf.Session()
 
-  def __call__(self, y: np.ndarray) -> Dict[int, np.ndarray]:
-    return self.sess.run(self.predictions, feed_dict={self.inputs: y})
+  def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
+    return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
 
 
 def odeint(equation: equations.Equation,
@@ -99,16 +103,11 @@ def odeint(equation: equations.Equation,
   if y0 is None:
     y0 = equation.initial_value()
 
-  def func(t: float, y: np.ndarray) -> np.ndarray:
-    spatial_derivatives = differentiator(y)
-    y_t = equation.equation_of_motion(y, spatial_derivatives)
-    return equation.finalize_time_derivative(t, y_t)
-
   # Most of our equations are somewhat stiff, so lower order Runga-Kutta is a
   # sane default. For whatever reason, the stiff solvers are much slower when
   # using TensorFlow to compute derivatives (even the baseline model) than
   # when using NumPy.
-  sol = scipy.integrate.solve_ivp(func, (times[0], times[-1]), y0,
+  sol = scipy.integrate.solve_ivp(differentiator, (times[0], times[-1]), y0,
                                   t_eval=times, max_step=0.01, method=method)
   y = sol.y.T  # (time, x)
 
@@ -157,7 +156,10 @@ def integrate_all(checkpoint_dir: str,
   equation_type = equations.from_hparams(hparams)
   equation_high = equation_type(exact_num_x_points, random_seed=random_seed)
   equation_low = equation_type(
-      exact_num_x_points // hparams.resample_factor, random_seed=random_seed)
+      exact_num_x_points // hparams.resample_factor,
+      resample_factor=hparams.resample_factor,
+      resample_method=hparams.resample_method,
+      random_seed=random_seed)
 
   logging.info('solving baseline model at high resolution')
   differentiator = BaselineDifferentiator(equation_high)
@@ -187,5 +189,9 @@ def integrate_all(checkpoint_dir: str,
       'y_exact': (('time', 'x_high'), solution_exact),
       'y_baseline': (('time', 'x_low'), solution_baseline),
       'y_model': (('time', 'x_low'), solution_model),
-  }, coords={'time': times, 'x_low': equation_low.x, 'x_high': equation_high.x})
+  }, coords={
+      'time': times,
+      'x_low': equation_low.grid.solution_x,
+      'x_high': equation_high.grid.solution_x
+  })
   return results

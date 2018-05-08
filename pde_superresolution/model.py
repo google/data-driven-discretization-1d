@@ -34,62 +34,16 @@ import numbers
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.contrib.integrate.python.ops import odes
+from tensorflow.contrib.integrate.python.ops import odes  # pylint: disable=g-bad-import-order
 from typing import Callable, List, Optional, Union, Dict, Tuple, Type, TypeVar
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import layers  # pylint: disable=invalid-import-order
-from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
+from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
+from pde_superresolution import equations  # pylint: disable=g-bad-import-order
+from pde_superresolution import layers  # pylint: disable=g-bad-import-order
+from pde_superresolution import polynomials  # pylint: disable=g-bad-import-order
 
 
 TensorLike = Union[tf.Tensor, np.ndarray, numbers.Number]  # pylint: disable=invalid-name
-
-
-def resample_mean(inputs: tf.Tensor, factor: int = 4) -> tf.Tensor:
-  """Resample data to a lower-resolution with the mean.
-
-  Args:
-    inputs: Tensor with dimensions [batch, x, ...].
-    factor: integer factor by which to reduce the size of the x-dimension.
-
-  Returns:
-    Tensor with dimensions [batch, x//factor, ...].
-
-  Raises:
-    ValueError: if x is not evenly divided by factor.
-  """
-  shape = inputs.shape.as_list()
-  if len(shape) not in {2, 3} or shape[1] % factor:
-    raise ValueError('invalid input shape: {}'.format(inputs.shape))
-  new_shape = [-1, shape[1] // factor, factor]
-  if len(shape) == 3:
-    new_shape.append(shape[2])
-  reshaped = tf.reshape(inputs, new_shape)
-  return tf.reduce_mean(reshaped, axis=2)
-
-
-def subsample(inputs, factor=4):
-  """Resample data to a lower-resolution by subsampling data-points.
-
-  Args:
-    inputs: Tensor with dimensions [batch, x, ...].
-    factor: integer factor by which to reduce the size of the x-dimension.
-
-  Returns:
-    Tensor with dimensions [batch, x//factor, ...].
-
-  Raises:
-    ValueError: if x is not evenly divided by factor.
-  """
-  if len(inputs.shape) not in {2, 3} or inputs.shape[1].value % factor:
-    raise ValueError('invalid input shape: {}'.format(inputs.shape))
-  return inputs[:, ::factor, ...]
-
-
-_RESAMPLE_FUNCS = {
-    'mean': resample_mean,
-    'subsample': subsample,
-}
 
 
 def baseline_space_derivatives(
@@ -102,7 +56,7 @@ def baseline_space_derivatives(
   spatial_derivatives_list = []
   for derivative_order in equation.DERIVATIVE_ORDERS:
     grid = polynomials.regular_finite_difference_grid(
-        equation.GRID_OFFSET, derivative_order, dx=equation.dx)
+        equation.GRID_OFFSET, derivative_order, dx=equation.grid.solution_dx)
     spatial_derivatives_list.append(
         polynomials.apply_finite_differences(inputs, grid, derivative_order)
     )
@@ -281,14 +235,14 @@ def model_inputs(fine_inputs: tf.Tensor,
     - 'inputs': float32 Tensor with shape [batch, x//factor] with low resolution
        inputs.
   """
-  resample = _RESAMPLE_FUNCS[hparams.resample_method]
+  resample = duckarray.RESAMPLE_FUNCS[hparams.resample_method]
   equation_type = equations.from_hparams(hparams)
 
   fine_derivatives = baseline_result(fine_inputs, equation_type,
                                      hparams.num_time_steps)
-  labels = resample(fine_derivatives, hparams.resample_factor)
+  labels = resample(fine_derivatives, factor=hparams.resample_factor, axis=1)
 
-  coarse_inputs = resample(fine_inputs, hparams.resample_factor)
+  coarse_inputs = resample(fine_inputs, factor=hparams.resample_factor, axis=1)
   baseline = baseline_result(coarse_inputs, equation_type,
                              hparams.num_time_steps)
 
@@ -372,7 +326,7 @@ def predict_coefficients(inputs: tf.Tensor,
     grid = polynomials.regular_finite_difference_grid(
         equation.GRID_OFFSET, derivative_order=0,
         accuracy_order=hparams.coefficient_grid_min_size,
-        dx=equation.dx)
+        dx=equation.grid.solution_dx)
 
     if hparams.num_layers == 0:
       # TODO(shoyer): still use PolynomialAccuracyLayer here

@@ -1,4 +1,5 @@
 """Code for PDE-superresolution."""
+from pde_superresolution import duckarray
 from pde_superresolution import equations
 from pde_superresolution import integrate
 from pde_superresolution import layers

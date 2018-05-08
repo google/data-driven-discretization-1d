@@ -28,8 +28,9 @@ import pandas as pd
 import tensorflow as tf
 from typing import Any, Dict, List, Tuple, Type, Union
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import model  # pylint: disable=invalid-import-order
+# pylint: disable=g-bad-import-order
+from pde_superresolution import equations
+from pde_superresolution import model
 
 
 def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:

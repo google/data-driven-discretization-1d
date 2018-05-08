@@ -21,15 +21,14 @@ from __future__ import print_function
 import tempfile
 
 from absl import flags
-from absl.testing import absltest
+from absl.testing import absltest  # pylint: disable=g-bad-import-order
 from absl.testing import parameterized
 import numpy as np
 import tensorflow as tf
 import xarray
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import integrate  # pylint: disable=invalid-import-order
-from pde_superresolution import training  # pylint: disable=invalid-import-order
+from pde_superresolution import integrate  # pylint: disable=g-bad-import-order
+from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
 FLAGS = flags.FLAGS
@@ -44,7 +43,7 @@ class IntegrateTest(parameterized.TestCase):
   def train(self, hparams):
     # train a model on random noise
     with tf.Graph().as_default():
-      snapshots = 0.01 * np.random.RandomState(0).randn(400, 100)
+      snapshots = 0.01 * np.random.RandomState(0).randn(100, 400)
       training.training_loop(snapshots, self.checkpoint_dir, hparams)
 
   @parameterized.parameters(

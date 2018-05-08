@@ -21,12 +21,40 @@ import numpy as np
 import tensorflow as tf
 from typing import Mapping, Tuple, Type, TypeVar
 
-from pde_superresolution import polynomials  # pylint: disable=invalid-import-order
+from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
+from pde_superresolution import polynomials  # pylint: disable=g-bad-import-order
 
 
 # TODO(shoyer): replace with TypeVar('T', np.ndarray, tf.Tensor) when pytype
 # supports it (b/74212131)
 T = TypeVar('T')
+
+
+class Grid(object):
+  """Object for keeping track of grids and resampling."""
+
+  def __init__(self,
+               solution_num_points: int,
+               resample_factor: int = 1,
+               resample_method: str = 'subsample',
+               period: float = 1.0):
+
+    self.resample_factor = resample_factor
+    self.resample_method = resample_method
+    self.period = period
+
+    self.solution_num_points = solution_num_points
+    self.solution_dx = period / solution_num_points
+    self.solution_x = self.solution_dx * np.arange(solution_num_points)
+
+    self.reference_num_points = solution_num_points * resample_factor
+    self.reference_dx = period / self.reference_num_points
+    self.reference_x = self.reference_dx * np.arange(self.reference_num_points)
+
+  def resample(self, x: T, axis: int = -1) -> T:
+    """Resample from the reference resolution to the solution resolution."""
+    func = duckarray.RESAMPLE_FUNCS[self.resample_method]
+    return func(x, self.resample_factor, axis=axis)
 
 
 class Equation(object):
@@ -38,21 +66,26 @@ class Equation(object):
 
   def __init__(self,
                num_points: int,
-               period: float = 1,
+               resample_factor: int = 1,
+               resample_method: str = 'subsample',
+               period: float = 1.0,
                random_seed: int = 0):
     """Constructor.
 
     Args:
-      num_points: number of positions in xat which the equation is defined.
+      num_points: number of positions in x at which the equation is solved.
+      resample_factor: integer factor by which num_points is resampled from the
+        original grid.
+      resample_method: string, either 'mean' or 'subsample'.
       period: period for x. Equation subclasses may set different default
         values appropriate for the equation being solved.
       random_seed: integer random seed for any stochastic aspects of the
         equation.
     """
-    self.num_points = num_points
-    self.period = period
-    self.dx = period / num_points
-    self.x = np.arange(num_points) * self.dx
+    # Note: Ideally we would pass in grid as a construtor argument, but we need
+    # different default grids for different equations, so we initialize it here
+    # instead.
+    self.grid = Grid(num_points, resample_factor, resample_method, period)
     self.random_seed = random_seed
 
   def initial_value(self) -> np.ndarray:
@@ -94,6 +127,8 @@ class Equation(object):
     ML models do *not* have access to finalize_time_derivative() during
     training. It is only used when integrating the PDE.
 
+    The default implementation returns y_t unmodified.
+
     Args:
       t: float giving current time.
       y_t: float np.ndarray with any number of dimensions giving
@@ -102,30 +137,33 @@ class Equation(object):
     Returns:
       Array with same dtype/shape as `y_t`.
     """
-    raise NotImplementedError
+    del t  # unused
+    return y_t
 
 
 class RandomForcing(object):
   """Deterministic random forcing for Burger's equation."""
 
   def __init__(self,
+               grid: Grid,
                nparams: int = 20,
-               period: float = 1,
                seed: int = 0,
                amplitude: float = 1,
                k_max: int = 3):
+    self.grid = grid
     rs = np.random.RandomState(seed)
     self.a = 0.5 * amplitude * rs.uniform(-1, 1, size=(nparams, 1))
     self.omega = rs.uniform(-0.4, 0.4, size=(nparams, 1))
     k_values = np.arange(1, k_max + 1)
     self.k = rs.choice(np.concatenate([-k_values, k_values]), size=(nparams, 1))
-    self.period = period
     self.phi = rs.uniform(0, 2 * np.pi, size=(nparams, 1))
 
-  def __call__(self, t: float, x: np.ndarray) -> np.ndarray:
-    spatial_phase = 2 * np.pi * self.k * x / self.period
-    return np.sum(
-        self.a * np.sin(self.omega * t + spatial_phase + self.phi), axis=0)
+  def __call__(self, t: float) -> np.ndarray:
+    spatial_phase = (2 * np.pi * self.k * self.grid.reference_x
+                     / self.grid.period)
+    signals = duckarray.sin(self.omega * t + spatial_phase + self.phi)
+    reference_forcing = duckarray.sum(self.a * signals, axis=0)
+    return self.grid.resample(reference_forcing)
 
 
 class BurgersEquation(Equation):
@@ -136,15 +174,18 @@ class BurgersEquation(Equation):
 
   def __init__(self,
                num_points: int,
+               resample_factor: int = 1,
+               resample_method: str = 'subsample',
                period: float = 2 * np.pi,
                random_seed: int = 0,
                eta: float = 0.04):
+    super(BurgersEquation, self).__init__(
+        num_points, resample_factor, resample_method, period, random_seed)
+    self.forcing = RandomForcing(self.grid, seed=random_seed)
     self.eta = eta
-    self.forcing = RandomForcing(seed=random_seed, period=period)
-    super(BurgersEquation, self).__init__(num_points, period, random_seed)
 
   def initial_value(self) -> np.ndarray:
-    return np.zeros_like(self.x)
+    return np.zeros_like(self.grid.solution_x)
 
   @property
   def time_step(self) -> float:
@@ -163,11 +204,11 @@ class BurgersEquation(Equation):
     y_t = self.eta * y_xx - y * y_x
     return y_t
 
-  def finalize_time_derivative(self, t: float, y_t: np.ndarray) -> np.ndarray:
-    return y_t + self.forcing(t, self.x)
+  def finalize_time_derivative(self, t: float, y_t: tf.Tensor) -> tf.Tensor:
+    return y_t + self.forcing(t)
 
 
-def _fixed_first_derivative(y: T, dx: float) -> T:
+def staggered_first_derivative(y: T, dx: float) -> T:
   """Calculate a first-order derivative with second order finite differences.
 
   This function works on both NumPy arrays and tf.Tensor objects.
@@ -181,8 +222,7 @@ def _fixed_first_derivative(y: T, dx: float) -> T:
   """
   # Use concat instead of roll because roll doesn't have GPU or TPU
   # implementations in TensorFlow
-  concat = np.concatenate if isinstance(y, np.ndarray) else tf.concat
-  y_forward = concat([y[..., 1:], y[..., :1]], axis=-1)
+  y_forward = duckarray.concatenate([y[..., 1:], y[..., :1]], axis=-1)
   return (1 / dx) * (y_forward - y)
 
 
@@ -198,7 +238,7 @@ class ConservativeBurgersEquation(BurgersEquation):
     y = spatial_derivatives[0]
     y_x = spatial_derivatives[1]
     flux = self.eta * y_x - 0.5 * y ** 2
-    y_t = _fixed_first_derivative(flux, self.dx)
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
 
@@ -210,13 +250,18 @@ class KdVEquation(Equation):
 
   def __init__(self,
                num_points: int,
+               resample_factor: int = 1,
+               resample_method: str = 'subsample',
                period: float = 50,
-               random_seed: int = 0):
-    self.forcing = RandomForcing(nparams=10, seed=random_seed, period=period)
-    super(KdVEquation, self).__init__(num_points, period, random_seed)
+               random_seed: int = 0,
+               smooth_derivatives: bool = False):
+    super(KdVEquation, self).__init__(
+        num_points, resample_factor, resample_method, period, random_seed)
+    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
+    self.smooth_derivatives = smooth_derivatives
 
   def initial_value(self) -> np.ndarray:
-    return self.forcing(0, self.x)
+    return self.forcing(0)
 
   @property
   def time_step(self) -> float:
@@ -235,15 +280,16 @@ class KdVEquation(Equation):
     y_t = -6.0 * y * y_x - y_xxx
     return y_t
 
-  def finalize_time_derivative(self, t: float, y_t: np.ndarray) -> np.ndarray:
+  def finalize_time_derivative(self, t: float, y_t: tf.Tensor) -> tf.Tensor:
     del t  # unused
     # Smooth out high-frequency noise. Empirically, this improves the stability
     # of finite differences for KdV considerably.
     # TODO(shoyer): figure out why this works (presumably, it's known in the PDE
     # literature), and explore ways to avoid this (e.g., by training the neural
     # network to estimate y_t rather than y_x and y_xxx).
-    y_t_smoothed = 0.25 * np.roll(y_t, -1) + 0.5 * y_t + 0.25 * np.roll(y_t, 1)
-    return y_t_smoothed
+    if self.smooth_derivatives:
+      y_t = 0.25 * np.roll(y_t, -1) + 0.5 * y_t + 0.25 * np.roll(y_t, 1)
+    return y_t
 
 
 class ConservativeKdVEquation(KdVEquation):
@@ -258,7 +304,7 @@ class ConservativeKdVEquation(KdVEquation):
     y = spatial_derivatives[0]
     y_xx = spatial_derivatives[2]
     flux = -3.0 * y ** 2 - y_xx
-    y_t = _fixed_first_derivative(flux, self.dx)
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
 
@@ -270,10 +316,13 @@ class KSEquation(Equation):
 
   def __init__(self,
                num_points: int,
+               resample_factor: int = 1,
+               resample_method: str = 'subsample',
                period: float = 100,
                random_seed: int = 0):
-    self.forcing = RandomForcing(nparams=10, seed=random_seed, period=period)
-    super(KSEquation, self).__init__(num_points, period, random_seed)
+    super(KSEquation, self).__init__(
+        num_points, resample_factor, resample_method, period, random_seed)
+    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
 
   @property
   def time_step(self) -> float:
@@ -286,7 +335,7 @@ class KSEquation(Equation):
     return 0.299
 
   def initial_value(self) -> np.ndarray:
-    return self.forcing(0, self.x)
+    return self.forcing(0)
 
   def equation_of_motion(
       self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
@@ -294,9 +343,6 @@ class KSEquation(Equation):
     y_xx = spatial_derivatives[2]
     y_xxxx = spatial_derivatives[4]
     y_t = -y*y_x - y_xxxx - y_xx
-    return y_t
-
-  def finalize_time_derivative(self, t: float, y_t: np.ndarray) -> np.ndarray:
     return y_t
 
 
@@ -313,7 +359,7 @@ class ConservativeKSEquation(KSEquation):
     y_x = spatial_derivatives[1]
     y_xxx = spatial_derivatives[3]
     flux = -0.5*y**2 - y_xxx - y_x
-    y_t = _fixed_first_derivative(flux, self.dx)
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
 

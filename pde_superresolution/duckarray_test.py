@@ -12,29 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for model functions."""
+"""Tests for duck array functions."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 from absl.testing import absltest  # pylint: disable=g-bad-import-order
-from absl.testing import parameterized
 import numpy as np
 import tensorflow as tf
 
-from pde_superresolution import model  # pylint: disable=g-bad-import-order
+from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 
 
-class ModelTest(parameterized.TestCase):
+class DuckArrayTest(absltest.TestCase):
 
-  def test_stack_all_rolls(self):
+  def test_resample_mean(self):
+    inputs = np.arange(6.0)
+    expected = np.array([0.5, 2.5, 4.5])
+    actual = duckarray.resample_mean(inputs, factor=2)
+    np.testing.assert_allclose(expected, actual)
+
     with tf.Graph().as_default():
-      with tf.Session():
-        inputs = tf.range(5)
-        actual = model._stack_all_rolls(inputs, 3)
-        expected = [[0, 1, 2, 3, 4], [1, 2, 3, 4, 0], [2, 3, 4, 0, 1]]
-        np.testing.assert_allclose(expected, actual.eval())
+      with tf.Session() as sess:
+        actual = sess.run(
+            duckarray.resample_mean(tf.constant(inputs), factor=2))
+    np.testing.assert_allclose(expected, actual)
+
+  def test_subsample(self):
+    inputs = np.arange(6)
+    expected = np.array([0, 2, 4])
+    actual = duckarray.subsample(inputs, factor=2)
+    np.testing.assert_allclose(expected, actual)
+
+    with tf.Graph().as_default():
+      with tf.Session() as sess:
+        actual = sess.run(
+            duckarray.subsample(tf.constant(inputs), factor=2))
+    np.testing.assert_allclose(expected, actual)
 
 
 if __name__ == '__main__':

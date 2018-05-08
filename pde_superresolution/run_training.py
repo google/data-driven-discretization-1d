@@ -28,8 +28,8 @@ import h5py
 import numpy as np
 import tensorflow as tf
 
-from pde_superresolution import equations  # pylint: disable=invalid-import-order
-from pde_superresolution import training  # pylint: disable=invalid-import-order
+from pde_superresolution import equations  # pylint: disable=g-bad-import-order
+from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
 flags.DEFINE_string(
