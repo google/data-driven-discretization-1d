@@ -168,7 +168,7 @@ def integrate_all(checkpoint_dir: str,
 
   if warmup:
     # use the sample after warmup to initialize later simulations
-    y0 = solution_exact[1, ::hparams.resample_factor]
+    y0 = equation_low.grid.resample(solution_exact[1, :])
     solution_exact = solution_exact[1:, :]
   else:
     y0 = None
