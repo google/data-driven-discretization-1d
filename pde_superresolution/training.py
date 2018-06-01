@@ -26,6 +26,8 @@ from absl import logging
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from typing import Any, Dict, List, Tuple, Type, Union
 
 # pylint: disable=g-bad-import-order
@@ -497,6 +499,24 @@ def metrics_to_dataframe(
   return pd.DataFrame(all_metrics)
 
 
+def _disable_rewrite_config():
+  """TensorFlow config for disabling graph rewrites."""
+  off = rewriter_config_pb2.RewriterConfig.OFF
+  rewriter_config = rewriter_config_pb2.RewriterConfig(
+      disable_model_pruning=True,
+      constant_folding=off,
+      arithmetic_optimization=off,
+      remapping=off,
+      shape_optimization=off,
+      dependency_optimization=off,
+      function_optimization=off,
+      layout_optimizer=off,
+      loop_optimization=off,
+      memory_optimization=rewriter_config_pb2.RewriterConfig.NO_MEM_OPT)
+  graph_options = config_pb2.GraphOptions(rewrite_options=rewriter_config)
+  return config_pb2.ConfigProto(graph_options=graph_options)
+
+
 def training_loop(snapshots: np.ndarray,
                   checkpoint_dir: str,
                   hparams: tf.contrib.training.HParams,
@@ -537,6 +557,7 @@ def training_loop(snapshots: np.ndarray,
       master=master,
       checkpoint_dir=checkpoint_dir,
       save_checkpoint_secs=300,
+      config=_disable_rewrite_config(),
       hooks=[SaveAtEnd(checkpoint_dir_to_path(checkpoint_dir))]) as sess:
 
     test_writer = tf.summary.FileWriter(
