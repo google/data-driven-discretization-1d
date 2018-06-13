@@ -390,4 +390,3 @@ def from_hparams(hparams: tf.contrib.training.HParams) -> Type[Equation]:
   else:
     types = EQUATION_TYPES
   return types[hparams.equation]
-

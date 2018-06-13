@@ -125,6 +125,31 @@ def odeint(equation: equations.Equation,
   return y
 
 
+def integrate_exact(
+    equation: equations.Equation,
+    times: np.ndarray = np.linspace(0, 10, num=201),
+    warmup: float = 0,
+    integrate_method: str = 'RK23') -> xarray.Dataset:
+  """Integrate only the exact model."""
+
+  if warmup:
+    times = times + warmup  # pylint: disable=g-no-augmented-assignment
+    exact_times = np.concatenate([[0], times])
+  else:
+    exact_times = times
+
+  differentiator = BaselineDifferentiator(equation)
+  solution_exact = odeint(equation, differentiator, exact_times,
+                          method=integrate_method)
+  if warmup:
+    solution_exact = solution_exact[1:, :]
+
+  results = xarray.Dataset(
+      data_vars={'y_exact': (('time', 'x'), solution_exact)},
+      coords={'time': times, 'x': equation.grid.solution_x})
+  return results
+
+
 def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
   """Load hyperparameters saved by training.py."""
   hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')
@@ -136,12 +161,13 @@ def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
   return training.create_hparams(**hparams.values())
 
 
-def integrate_all(checkpoint_dir: str,
-                  random_seed: int = 0,
-                  exact_num_x_points: int = 400,
-                  times: np.ndarray = np.linspace(0, 10, num=201),
-                  warmup: float = 0,
-                  integrate_method: str = 'RK23') -> xarray.Dataset:
+def integrate_exact_baseline_and_model(
+    checkpoint_dir: str,
+    random_seed: int = 0,
+    exact_num_x_points: int = 400,
+    times: np.ndarray = np.linspace(0, 10, num=201),
+    warmup: float = 0,
+    integrate_method: str = 'RK23') -> xarray.Dataset:
   """Integrate the given PDE with standard and modeled finite differences."""
   hparams = load_hparams(checkpoint_dir)
 

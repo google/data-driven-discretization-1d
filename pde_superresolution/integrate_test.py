@@ -27,6 +27,7 @@ import numpy as np
 import tensorflow as tf
 import xarray
 
+from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import integrate  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
@@ -55,7 +56,7 @@ class IntegrateTest(parameterized.TestCase):
       dict(equation='ks', conservative=True),
       dict(equation='burgers', warmup=1),
   )
-  def test_integrate_all(self, warmup=0, **hparam_values):
+  def test_integrate_exact_baseline_and_model(self, warmup=0, **hparam_values):
     hparams = training.create_hparams(
         learning_rates=[1e-3],
         learning_stops=[20],
@@ -63,7 +64,7 @@ class IntegrateTest(parameterized.TestCase):
         **hparam_values)
     self.train(hparams)
 
-    results = integrate.integrate_all(
+    results = integrate.integrate_exact_baseline_and_model(
         self.checkpoint_dir,
         times=np.linspace(0, 1, num=11),
         warmup=warmup)
@@ -86,6 +87,23 @@ class IntegrateTest(parameterized.TestCase):
         y_exact, results.y_baseline.isel(time=0).values)
     np.testing.assert_allclose(
         y_exact, results.y_model.isel(time=0).values)
+
+  @parameterized.parameters(
+      dict(equation=equations.BurgersEquation(200)),
+      dict(equation=equations.KdVEquation(200)),
+      dict(equation=equations.KSEquation(200), warmup=50.0),
+  )
+  def test_integrate_exact(self, equation, **kwargs):
+    results = integrate.integrate_exact(
+        equation, times=np.linspace(0, 1, num=11), **kwargs)
+    self.assertIsInstance(results, xarray.Dataset)
+    self.assertEqual(dict(results.dims), {'time': 11, 'x': 200})
+    self.assertEqual(results['y_exact'].dims, ('time', 'x'))
+
+    # average value should remain near 0
+    y_exact_mean = results.y_exact.mean('x')
+    xarray.testing.assert_allclose(
+        y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
 
 
 if __name__ == '__main__':
