@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import numpy as np
 import tensorflow as tf
 from typing import Mapping, Tuple, Type, TypeVar
@@ -178,11 +179,13 @@ class BurgersEquation(Equation):
                resample_method: str = 'subsample',
                period: float = 2 * np.pi,
                random_seed: int = 0,
-               eta: float = 0.04):
+               eta: float = 0.04,
+               k_max: int = 3):
     super(BurgersEquation, self).__init__(
         num_points, resample_factor, resample_method, period, random_seed)
-    self.forcing = RandomForcing(self.grid, seed=random_seed)
+    self.forcing = RandomForcing(self.grid, seed=random_seed, k_max=k_max)
     self.eta = eta
+    self.k_max = k_max
 
   def initial_value(self) -> np.ndarray:
     return np.zeros_like(self.grid.solution_x)
@@ -253,12 +256,10 @@ class KdVEquation(Equation):
                resample_factor: int = 1,
                resample_method: str = 'subsample',
                period: float = 50,
-               random_seed: int = 0,
-               smooth_derivatives: bool = False):
+               random_seed: int = 0):
     super(KdVEquation, self).__init__(
         num_points, resample_factor, resample_method, period, random_seed)
     self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
-    self.smooth_derivatives = smooth_derivatives
 
   def initial_value(self) -> np.ndarray:
     return self.forcing(0)
@@ -278,17 +279,6 @@ class KdVEquation(Equation):
     y_x = spatial_derivatives[1]
     y_xxx = spatial_derivatives[3]
     y_t = -6.0 * y * y_x - y_xxx
-    return y_t
-
-  def finalize_time_derivative(self, t: float, y_t: tf.Tensor) -> tf.Tensor:
-    del t  # unused
-    # Smooth out high-frequency noise. Empirically, this improves the stability
-    # of finite differences for KdV considerably.
-    # TODO(shoyer): figure out why this works (presumably, it's known in the PDE
-    # literature), and explore ways to avoid this (e.g., by training the neural
-    # network to estimate y_t rather than y_x and y_xxx).
-    if self.smooth_derivatives:
-      y_t = 0.25 * np.roll(y_t, -1) + 0.5 * y_t + 0.25 * np.roll(y_t, 1)
     return y_t
 
 
@@ -376,8 +366,9 @@ CONSERVATIVE_EQUATION_TYPES = {
 }
 
 
-def from_hparams(hparams: tf.contrib.training.HParams) -> Type[Equation]:
-  """Get the equation type from HParams.
+def equation_type_from_hparams(
+    hparams: tf.contrib.training.HParams) -> Type[Equation]:
+  """Create an equation type from HParams.
 
   Args:
     hparams: hyperparameters for training.
@@ -390,3 +381,45 @@ def from_hparams(hparams: tf.contrib.training.HParams) -> Type[Equation]:
   else:
     types = EQUATION_TYPES
   return types[hparams.equation]
+
+
+def from_hparams(
+    hparams: tf.contrib.training.HParams,
+    random_seed: int = 0) -> Tuple[Equation, Equation]:
+  """Create Equation objects for model training from HParams.
+
+  Args:
+    hparams: hyperparameters for training.
+    random_seed: integer random seed.
+
+  Returns:
+    A tuple of two Equation objects, providing the equations being solved on
+    the fine (exact) and coarse (modeled) grids. The fine equation is always the
+    original, non-conservative version.
+
+  Raises:
+    ValueError: if hparams.resample_factor does not exactly divide
+      exact_grid_size.
+  """
+  kwargs = json.loads(hparams.equation_kwargs)
+  exact_num_points = kwargs.pop('num_points')
+
+  num_points, remainder = divmod(exact_num_points, hparams.resample_factor)
+  if remainder:
+    raise ValueError('resample_factor={} does not divide exact_num_points={}'
+                     .format(hparams.resample_factor, exact_num_points))
+
+  equation_type = equation_type_from_hparams(hparams)
+  fine_equation = equation_type(
+      exact_num_points,
+      resample_factor=1,
+      random_seed=random_seed,
+      **kwargs)
+  coarse_equation = equation_type(
+      num_points,
+      resample_factor=hparams.resample_factor,
+      resample_method=hparams.resample_method,
+      random_seed=random_seed,
+      **kwargs)
+
+  return fine_equation, coarse_equation

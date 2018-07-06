@@ -35,7 +35,7 @@ import numbers
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.integrate.python.ops import odes  # pylint: disable=g-bad-import-order
-from typing import Callable, List, Optional, Union, Dict, Tuple, Type, TypeVar
+from typing import Callable, List, Optional, Union, Dict, Tuple, TypeVar
 
 from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
@@ -46,13 +46,28 @@ from pde_superresolution import polynomials  # pylint: disable=g-bad-import-orde
 TensorLike = Union[tf.Tensor, np.ndarray, numbers.Number]  # pylint: disable=invalid-name
 
 
+def assert_consistent_solution(
+    equation: equations.Equation, solution: tf.Tensor):
+  """Verify that a solution is consistent with the underlying equation.
+
+  Args:
+    equation: equation being modeled.
+    solution: float32 Tensor with dimensions [batch, x].
+
+  Raises:
+    ValueError: if solution does not have the expected size for the equation.
+  """
+  if equation.grid.solution_num_points != solution.shape[-1].value:
+    raise ValueError('solution has unexpected size for equation: {} vs {}'
+                     .format(solution.shape[-1].value,
+                             equation.grid.solution_num_points))
+
+
 def baseline_space_derivatives(
     inputs: tf.Tensor,
-    equation_type: Type[equations.Equation]) -> tf.Tensor:
+    equation: equations.Equation) -> tf.Tensor:
   """Calculate spatial derivatives using standard finite differences."""
-  num_x_points = inputs.shape[-1].value
-  equation = equation_type(num_x_points)
-
+  assert_consistent_solution(equation, inputs)
   spatial_derivatives_list = []
   for derivative_order in equation.DERIVATIVE_ORDERS:
     grid = polynomials.regular_finite_difference_grid(
@@ -66,7 +81,7 @@ def baseline_space_derivatives(
 def apply_space_derivatives(
     derivatives: tf.Tensor,
     inputs: tf.Tensor,
-    equation_type: Type[equations.Equation]) -> tf.Tensor:
+    equation: equations.Equation) -> tf.Tensor:
   """Combine spatial derivatives with input to calculate time derivatives.
 
   Args:
@@ -74,22 +89,21 @@ def apply_space_derivatives(
       unnormalized spatial derivatives, e.g., as output from
       predict_derivatives() or center_finite_differences().
     inputs: float32 tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
+    equation: equation being solved.
 
   Returns:
     Float32 Tensor with diensions [batch, x] giving the time derivatives for
     the given inputs and derivative model.
   """
-  equation = equation_type(inputs.shape[-1].value)
   derivatives_dict = {d: derivatives[..., i]
-                      for i, d in enumerate(equation_type.DERIVATIVE_ORDERS)}
+                      for i, d in enumerate(equation.DERIVATIVE_ORDERS)}
   return equation.equation_of_motion(inputs, derivatives_dict)
 
 
-def integrate_equation(func: Callable[[tf.Tensor, float], tf.Tensor],
-                       inputs: tf.Tensor,
-                       num_time_steps: int,
-                       equation_type: Type[equations.Equation]) -> tf.Tensor:
+def integrate_ode(func: Callable[[tf.Tensor, float], tf.Tensor],
+                  inputs: tf.Tensor,
+                  num_time_steps: int,
+                  time_step: float) -> tf.Tensor:
   """Integrate an equation with a fixed time-step.
 
   Args:
@@ -98,12 +112,11 @@ def integrate_equation(func: Callable[[tf.Tensor, float], tf.Tensor],
     inputs: tensor with shape [batch, x] giving initial conditions to use for
       time integration.
     num_time_steps: integer number of time steps to integrate over.
-    equation_type: type of equation being solved.
+    time_step: size of each time step.
 
   Returns:
     Tensor with shape [batch, x, num_time_steps].
   """
-  time_step = equation_type(inputs.shape[1].value).time_step
   times = np.arange(num_time_steps + 1) * time_step
   result = odes.odeint_fixed(func, inputs, times, method='midpoint')
   # drop the first time step, which is exactly equal to the inputs.
@@ -113,13 +126,13 @@ def integrate_equation(func: Callable[[tf.Tensor, float], tf.Tensor],
 def baseline_time_evolution(
     inputs: tf.Tensor,
     num_time_steps: int,
-    equation_type: Type[equations.Equation]) -> tf.Tensor:
+    equation: equations.Equation) -> tf.Tensor:
   """Infer time evolution from inputs with our baseline model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
     num_time_steps: integer number of time steps to integrate over.
-    equation_type: type of equation being solved.
+    equation: equation being solved.
 
   Returns:
     Float32 Tensor with dimensions [batch, x, num_time_steps+1] with the
@@ -129,9 +142,9 @@ def baseline_time_evolution(
   def func(y, t):
     del t  # unused
     return apply_space_derivatives(
-        baseline_space_derivatives(y, equation_type), y, equation_type)
+        baseline_space_derivatives(y, equation), y, equation)
 
-  return integrate_equation(func, inputs, num_time_steps, equation_type)
+  return integrate_ode(func, inputs, num_time_steps, equation.time_step)
 
 
 def result_stack(space_derivatives: Union[tf.Tensor, List[tf.Tensor]],
@@ -157,24 +170,24 @@ def result_stack(space_derivatives: Union[tf.Tensor, List[tf.Tensor]],
 
 def result_unstack(
     tensor: tf.Tensor,
-    equation_type: Type[equations.Equation]
+    equation: equations.Equation
 ) -> Tuple[tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
   """Separate a stacked result tensor into components.
 
-  The first len(equation_type.DERIVATIVE_ORDERS) components of tensor are taken
+  The first len(equation.DERIVATIVE_ORDERS) components of tensor are taken
   to be space derivatives, followed by time derivatives, followed by zero or
   more integrated solutions.
 
   Args:
     tensor: result tensor with one or more dimensions, e.g., from
       result_stack().
-    equation_type: type of equation being solved.
+    equation: equation being solved.
 
   Returns:
     Tuple (space_derivatives, time_derivative, integrated_solution), where the
     last solution is either a tensor or None, if there is no time integration.
   """
-  num_space_derivatives = len(equation_type.DERIVATIVE_ORDERS)
+  num_space_derivatives = len(equation.DERIVATIVE_ORDERS)
   space_derivatives = tensor[..., :num_space_derivatives]
   time_derivative = tensor[..., num_space_derivatives]
   if tensor.shape[-1].value > num_space_derivatives + 1:
@@ -192,13 +205,13 @@ def _stack_all_rolls(inputs: tf.Tensor, max_offset: int) -> tf.Tensor:
 
 
 def baseline_result(inputs: tf.Tensor,
-                    equation_type: Type[equations.Equation],
+                    equation: equations.Equation,
                     num_time_steps: int = 0) -> tf.Tensor:
   """Calculate derivatives and time-evolution using our baseline model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
-    equation_type: type of equation being solved.
+    equation: equation being solved.
     num_time_steps: integer number of time steps to integrate over.
 
   Returns:
@@ -206,12 +219,12 @@ def baseline_result(inputs: tf.Tensor,
     derivatives, time derivative and the integrated solution.
   """
   # TODO(shoyer): use a neural network to filter inputs, too.
-  space_derivatives = baseline_space_derivatives(inputs, equation_type)
+  space_derivatives = baseline_space_derivatives(inputs, equation)
   time_derivative = apply_space_derivatives(
-      space_derivatives, inputs, equation_type)
+      space_derivatives, inputs, equation)
   if num_time_steps:
     integrated_solution = baseline_time_evolution(
-        inputs, num_time_steps, equation_type)
+        inputs, num_time_steps, equation)
   else:
     integrated_solution = None
   return result_stack(space_derivatives, time_derivative, integrated_solution)
@@ -236,14 +249,14 @@ def model_inputs(fine_inputs: tf.Tensor,
        inputs.
   """
   resample = duckarray.RESAMPLE_FUNCS[hparams.resample_method]
-  equation_type = equations.from_hparams(hparams)
+  fine_equation, coarse_equation = equations.from_hparams(hparams)
 
-  fine_derivatives = baseline_result(fine_inputs, equation_type,
+  fine_derivatives = baseline_result(fine_inputs, fine_equation,
                                      hparams.num_time_steps)
   labels = resample(fine_derivatives, factor=hparams.resample_factor, axis=1)
 
   coarse_inputs = resample(fine_inputs, factor=hparams.resample_factor, axis=1)
-  baseline = baseline_result(coarse_inputs, equation_type,
+  baseline = baseline_result(coarse_inputs, coarse_equation,
                              hparams.num_time_steps)
 
   return {'labels': labels, 'baseline': baseline, 'inputs': coarse_inputs}
@@ -315,12 +328,15 @@ def predict_coefficients(inputs: tf.Tensor,
     Float32 Tensor with dimensions [batch, x, derivative, coefficient].
 
   Raises:
+    ValueError: if inputs does not have the expected size for the equation.
     ValueError: if polynomial accuracy constraints are infeasible.
   """
   # TODO(shoyer): refactor to use layer classes to hold variables, like
   # tf.keras.layers, instead of relying on reuse.
+  _, equation = equations.from_hparams(hparams)
+  assert_consistent_solution(equation, inputs)
+
   with tf.variable_scope('predict_coefficients', reuse=reuse):
-    equation = equations.from_hparams(hparams)(inputs.shape[-1].value)
     num_derivatives = len(equation.DERIVATIVE_ORDERS)
 
     grid = polynomials.regular_finite_difference_grid(
@@ -454,11 +470,10 @@ def predict_time_derivative(
   Returns:
     Float32 Tensor with dimensions [batch, x] with inferred time derivatives.
   """
-  # TODO(shoyer): use a neural network to filter inputs, too.
-  space_derivatives = predict_space_derivatives(inputs, hparams, reuse=reuse)
-
-  equation_type = equations.from_hparams(hparams)
-  return apply_space_derivatives(space_derivatives, inputs, equation_type)
+  space_derivatives = predict_space_derivatives(
+      inputs, hparams, reuse=reuse)
+  _, equation = equations.from_hparams(hparams)
+  return apply_space_derivatives(space_derivatives, inputs, equation)
 
 
 def predict_time_evolution(inputs: tf.Tensor,
@@ -477,8 +492,9 @@ def predict_time_evolution(inputs: tf.Tensor,
     del t  # unused
     return predict_time_derivative(y, hparams, reuse=True)
 
-  equation_type = equations.from_hparams(hparams)
-  return integrate_equation(func, inputs, hparams.num_time_steps, equation_type)
+  _, equation = equations.from_hparams(hparams)
+  return integrate_ode(
+      func, inputs, hparams.num_time_steps, equation.time_step)
 
 
 def predict_result(inputs: tf.Tensor,
@@ -494,9 +510,9 @@ def predict_result(inputs: tf.Tensor,
   """
   space_derivatives = predict_space_derivatives(inputs, hparams)
 
-  equation_type = equations.from_hparams(hparams)
+  _, equation = equations.from_hparams(hparams)
   time_derivative = apply_space_derivatives(
-      space_derivatives, inputs, equation_type)
+      space_derivatives, inputs, equation)
 
   if hparams.num_time_steps:
     integrated_solution = predict_time_evolution(inputs, hparams)
@@ -590,7 +606,7 @@ def weighted_loss(normalized_loss_per_head: tf.Tensor,
       [hparams.absolute_error_weight, hparams.relative_error_weight])
   abs_rel_weights /= tf.reduce_sum(abs_rel_weights)
 
-  equation_type = equations.from_hparams(hparams)
+  equation_type = equations.equation_type_from_hparams(hparams)
 
   num_space = len(equation_type.DERIVATIVE_ORDERS)
   num_integrated = normalized_loss_per_head.shape[-1].value - num_space - 1

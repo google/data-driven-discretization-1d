@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import os.path
 
 from absl import app
@@ -55,18 +56,20 @@ def main(unused_argv):
   logging.info('Loading training data')
   with utils.read_h5py(FLAGS.input_path) as f:
     snapshots = f['v'][...]
+    equation_kwargs = dict(f.attrs)
 
   logging.info('Inputs have shape %r', snapshots.shape)
 
   if FLAGS.checkpoint_dir:
     tf.gfile.MakeDirs(FLAGS.checkpoint_dir)
 
-  hparams = training.create_hparams(FLAGS.equation)
+  hparams = training.create_hparams(
+      FLAGS.equation, equation_kwargs=json.dumps(equation_kwargs))
   hparams.parse(FLAGS.hparams)
 
   logging.info('Starting training loop')
-  metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir, hparams,
-                                      master=FLAGS.master)
+  metrics_df = training.training_loop(snapshots, FLAGS.checkpoint_dir,
+                                      hparams, master=FLAGS.master)
 
   if FLAGS.checkpoint_dir:
     logging.info('Saving CSV with metrics')

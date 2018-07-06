@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import tempfile
 
 from absl import flags
@@ -34,6 +35,8 @@ from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 FLAGS = flags.FLAGS
 
+NUM_X_POINTS = 256
+
 
 class IntegrateTest(parameterized.TestCase):
 
@@ -44,7 +47,7 @@ class IntegrateTest(parameterized.TestCase):
   def train(self, hparams):
     # train a model on random noise
     with tf.Graph().as_default():
-      snapshots = 0.01 * np.random.RandomState(0).randn(100, 400)
+      snapshots = 0.01 * np.random.RandomState(0).randn(100, NUM_X_POINTS)
       training.training_loop(snapshots, self.checkpoint_dir, hparams)
 
   @parameterized.parameters(
@@ -61,6 +64,8 @@ class IntegrateTest(parameterized.TestCase):
         learning_rates=[1e-3],
         learning_stops=[20],
         eval_interval=10,
+        equation_kwargs=json.dumps({'num_points': NUM_X_POINTS}),
+        resample_method='subsample',
         **hparam_values)
     self.train(hparams)
 
@@ -71,7 +76,9 @@ class IntegrateTest(parameterized.TestCase):
 
     self.assertIsInstance(results, xarray.Dataset)
     self.assertEqual(dict(results.dims),
-                     {'time': 11, 'x_high': 400, 'x_low': 100})
+                     {'time': 11,
+                      'x_high': NUM_X_POINTS,
+                      'x_low': NUM_X_POINTS // 4})
     self.assertEqual(results['y_exact'].dims, ('time', 'x_high'))
     self.assertEqual(results['y_baseline'].dims, ('time', 'x_low'))
     self.assertEqual(results['y_model'].dims, ('time', 'x_low'))

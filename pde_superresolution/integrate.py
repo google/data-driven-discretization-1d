@@ -23,8 +23,10 @@ from absl import logging
 from google.protobuf import text_format  # pylint: disable=g-bad-import-order
 from tensorflow.contrib.training.python.training import hparam_pb2  # pylint: disable=g-bad-import-order
 import numpy as np
+import scipy.fftpack
 import scipy.integrate
 import tensorflow as tf
+from typing import Tuple
 import xarray
 
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
@@ -66,7 +68,7 @@ class SavedModelDifferentiator(Differentiator):
     return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
 
 
-class BaselineDifferentiator(Differentiator):
+class FiniteDifferenceDifferentiator(Differentiator):
   """Calculate derivatives using standard finite difference coefficients."""
 
   def __init__(self,
@@ -79,11 +81,10 @@ class BaselineDifferentiator(Differentiator):
       self.inputs = tf.placeholder(tf.float32, shape=(num_points,))
 
       batched_inputs = self.inputs[tf.newaxis, :]
-      equation_type = type(equation)
       space_derivatives = model.baseline_space_derivatives(
-          batched_inputs, equation_type)
+          batched_inputs, equation)
       time_derivative = tf.squeeze(model.apply_space_derivatives(
-          space_derivatives, batched_inputs, equation_type), axis=0)
+          space_derivatives, batched_inputs, equation), axis=0)
       self.value = equation.finalize_time_derivative(self.t, time_derivative)
 
       self.sess = tf.Session()
@@ -92,11 +93,25 @@ class BaselineDifferentiator(Differentiator):
     return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
 
 
+class SpectralDifferentiator(Differentiator):
+  """Calculate derivatives using a spectral method."""
+
+  def __init__(self, equation: equations.Equation):
+    self.equation = equation
+
+  def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
+    period = self.equation.grid.period
+    space_derivatives = {order: scipy.fftpack.diff(y, order, period)
+                         for order in self.equation.DERIVATIVE_ORDERS}
+    time_derivative = self.equation.equation_of_motion(y, space_derivatives)
+    return self.equation.finalize_time_derivative(t, time_derivative)
+
+
 def odeint(equation: equations.Equation,
            differentiator: Differentiator,
            times: np.ndarray,
            y0: np.ndarray = None,
-           method: str = 'RK23') -> np.ndarray:
+           method: str = 'RK23') -> Tuple[np.ndarray, int]:
   """Integrate an ODE."""
   logging.info('solve_ivp for %s from %s to %s', equation, times[0], times[-1])
 
@@ -122,7 +137,42 @@ def odeint(equation: equations.Equation,
     pad_width = ((0, num_missing), (0, 0))
     y = np.pad(y, pad_width, mode='constant', constant_values=np.nan)
 
-  return y
+  return y, sol.nfev
+
+
+def exact_equation_and_differentiator(
+    equation: equations.Equation) -> Tuple[equations.Equation, Differentiator]:
+  """Return an "exact" differentiator for the given equation.
+
+  Args:
+    equation: equation for which to produce an "exact" variant.
+
+  Returns:
+    Equation and differentiator to use for "exact" integration.
+  """
+  if isinstance(equation, equations.BurgersEquation):
+    new_equation = equations.ConservativeBurgersEquation(
+        equation.grid.solution_num_points,
+        period=equation.grid.period,
+        random_seed=equation.random_seed,
+        eta=equation.eta,
+        k_max=equation.k_max)
+    differentiator = FiniteDifferenceDifferentiator(new_equation)
+  elif isinstance(equation, equations.KdVEquation):
+    new_equation = equations.KdVEquation(
+        equation.grid.solution_num_points,
+        period=equation.grid.period,
+        random_seed=equation.random_seed)
+    differentiator = SpectralDifferentiator(new_equation)
+  elif isinstance(equation, equations.KSEquation):
+    new_equation = equations.KSEquation(
+        equation.grid.solution_num_points,
+        period=equation.grid.period,
+        random_seed=equation.random_seed)
+    differentiator = SpectralDifferentiator(new_equation)
+  else:
+    raise TypeError('unexpected equation: {}'.format(equation))
+  return new_equation, differentiator
 
 
 def integrate_exact(
@@ -138,15 +188,16 @@ def integrate_exact(
   else:
     exact_times = times
 
-  differentiator = BaselineDifferentiator(equation)
-  solution_exact = odeint(equation, differentiator, exact_times,
-                          method=integrate_method)
+  equation, differentiator = exact_equation_and_differentiator(equation)
+  solution_exact, num_evals = odeint(
+      equation, differentiator, exact_times, method=integrate_method)
   if warmup:
     solution_exact = solution_exact[1:, :]
 
   results = xarray.Dataset(
       data_vars={'y_exact': (('time', 'x'), solution_exact)},
-      coords={'time': times, 'x': equation.grid.solution_x})
+      coords={'time': times, 'x': equation.grid.solution_x,
+              'num_evals': num_evals})
   return results
 
 
@@ -164,7 +215,6 @@ def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
 def integrate_exact_baseline_and_model(
     checkpoint_dir: str,
     random_seed: int = 0,
-    exact_num_x_points: int = 400,
     times: np.ndarray = np.linspace(0, 10, num=201),
     warmup: float = 0,
     integrate_method: str = 'RK23') -> xarray.Dataset:
@@ -179,37 +229,33 @@ def integrate_exact_baseline_and_model(
   else:
     exact_times = times
 
-  equation_type = equations.from_hparams(hparams)
-  equation_high = equation_type(exact_num_x_points, random_seed=random_seed)
-  equation_low = equation_type(
-      exact_num_x_points // hparams.resample_factor,
-      resample_factor=hparams.resample_factor,
-      resample_method=hparams.resample_method,
-      random_seed=random_seed)
+  equation_exact, equation_coarse = equations.from_hparams(
+      hparams, random_seed=random_seed)
 
-  logging.info('solving baseline model at high resolution')
-  differentiator = BaselineDifferentiator(equation_high)
-  solution_exact = odeint(equation_high, differentiator, exact_times,
-                          method=integrate_method)
+  logging.info('solving the "exact" model at high resolution')
+  equation_exact, differentiator = exact_equation_and_differentiator(
+      equation_exact)
+  solution_exact, num_evals_exact = odeint(
+      equation_exact, differentiator, exact_times, method=integrate_method)
 
   if warmup:
     # use the sample after warmup to initialize later simulations
-    y0 = equation_low.grid.resample(solution_exact[1, :])
+    y0 = equation_coarse.grid.resample(solution_exact[1, :])
     solution_exact = solution_exact[1:, :]
   else:
     y0 = None
 
-  logging.info('solving baseline model at low resolution')
-  differentiator = BaselineDifferentiator(equation_low)
-  solution_baseline = odeint(equation_low, differentiator, times, y0=y0,
-                             method=integrate_method)
+  logging.info('solving baseline finite differences at low resolution')
+  differentiator = FiniteDifferenceDifferentiator(equation_coarse)
+  solution_baseline, num_evals_baseline = odeint(
+      equation_coarse, differentiator, times, y0=y0, method=integrate_method)
 
   logging.info('solving neural network model at low resolution')
   checkpoint_path = training.checkpoint_dir_to_path(checkpoint_dir)
   differentiator = SavedModelDifferentiator(
-      checkpoint_path, equation_low, hparams)
-  solution_model = odeint(equation_low, differentiator, times, y0=y0,
-                          method=integrate_method)
+      checkpoint_path, equation_coarse, hparams)
+  solution_model, num_evals_model = odeint(
+      equation_coarse, differentiator, times, y0=y0, method=integrate_method)
 
   results = xarray.Dataset({
       'y_exact': (('time', 'x_high'), solution_exact),
@@ -217,7 +263,10 @@ def integrate_exact_baseline_and_model(
       'y_model': (('time', 'x_low'), solution_model),
   }, coords={
       'time': times,
-      'x_low': equation_low.grid.solution_x,
-      'x_high': equation_high.grid.solution_x
+      'x_low': equation_coarse.grid.solution_x,
+      'x_high': equation_exact.grid.solution_x,
+      'num_evals_exact': num_evals_exact,
+      'num_evals_baseline': num_evals_baseline,
+      'num_evals_model': num_evals_model,
   })
   return results

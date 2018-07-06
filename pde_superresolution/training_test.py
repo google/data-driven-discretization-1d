@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import tempfile
 
 from absl import flags
@@ -31,6 +32,8 @@ from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
 FLAGS = flags.FLAGS
+
+NUM_X_POINTS = 256
 
 
 class TrainingTest(parameterized.TestCase):
@@ -54,15 +57,16 @@ class TrainingTest(parameterized.TestCase):
       dict(equation='ks', polynomial_accuracy_order=0),
       dict(equation='burgers', resample_method='mean'),
       dict(equation='burgers', kernel_size=5, nonlinearity='relu6'),
-      dict(equation='burgers', resample_factor=100),
+      dict(equation='burgers', resample_factor=64),
       *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():
-      snapshots = np.random.RandomState(0).randn(100, 400)
+      snapshots = np.random.RandomState(0).randn(100, NUM_X_POINTS)
       hparams = training.create_hparams(
           learning_rates=[1e-3],
           learning_stops=[20],
           eval_interval=10,
+          equation_kwargs=json.dumps({'num_points': NUM_X_POINTS}),
           **hparam_values)
       results = training.training_loop(snapshots, self.tmpdir, hparams)
       self.assertIsInstance(results, pd.DataFrame)

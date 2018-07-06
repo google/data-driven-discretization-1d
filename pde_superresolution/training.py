@@ -45,6 +45,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
     resample_factor: integer factor by which to upscale from low to high
       resolution. Must evenly divide the high resolution grid.
     resample_method: string, either 'mean' or 'subsample'.
+    equation_kwargs: JSON encoded string with equation specific keyword
+      arguments, excluding resample_factor, resample_method and random_seed.
 
   Neural network parameters:
     num_layers: integer number of conv1d layers to use for coefficient
@@ -103,8 +105,9 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       # dataset parameters
       equation=equation,
       conservative=True,
+      equation_kwargs='{}',
       resample_factor=4,
-      resample_method='subsample',
+      resample_method='mean',
       # neural network parameters
       num_layers=3,
       filter_size=128,
@@ -126,7 +129,7 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       error_scale=[np.nan],  # set by set_data_dependent_hparams
       error_floor=[np.nan],  # set by set_data_dependent_hparams
       absolute_error_weight=1.0,
-      relative_error_weight=0.0,
+      relative_error_weight=1.0,
       space_derivatives_weight=1.0,
       time_derivative_weight=1.0,
       integrated_solution_weight=1.0,
@@ -135,7 +138,9 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
   return hparams
 
 
-def set_data_dependent_hparams(hparams, snapshots):
+def set_data_dependent_hparams(
+    hparams: tf.contrib.training.HParams,
+    snapshots: np.ndarray):
   """Add data-dependent hyperparameters to hparams.
 
   Added hyper-parameters:
@@ -186,9 +191,9 @@ def create_training_step(
   return train_step
 
 
-def setup_training(snapshots: np.ndarray,
-                   hparams: tf.contrib.training.HParams
-                  ) -> Tuple[tf.Tensor, tf.Tensor]:
+def setup_training(
+    snapshots: np.ndarray,
+    hparams: tf.contrib.training.HParams) -> Tuple[tf.Tensor, tf.Tensor]:
   """Create Tensors for training.
 
   Args:
@@ -237,13 +242,13 @@ class Inferer(object):
     iterator = dataset.make_initializable_iterator()
     data = iterator.get_next()
 
-    equation_type = equations.from_hparams(hparams)
+    _, coarse_equation = equations.from_hparams(hparams)
 
     with tf.device('/cpu:0'):
       coefficients = model.predict_coefficients(data['inputs'], hparams)
       space_derivatives = model.apply_coefficients(coefficients, data['inputs'])
       time_derivative = model.apply_space_derivatives(
-          space_derivatives, data['inputs'], equation_type)
+          space_derivatives, data['inputs'], coarse_equation)
       if hparams.num_time_steps:
         integrated_solution = model.predict_time_evolution(
             data['inputs'], hparams)
@@ -265,7 +270,7 @@ class Inferer(object):
       metrics['loss'] = tf.metrics.mean(loss)
 
       space_loss, time_loss, integrated_loss = model.result_unstack(
-          loss_per_head, equation_type)
+          loss_per_head, coarse_equation)
       metrics['loss/space_derivatives'] = tf.metrics.mean(space_loss)
       metrics['loss/time_derivative'] = tf.metrics.mean(time_loss)
       if integrated_loss is not None:
@@ -326,7 +331,7 @@ def load_dataset(dataset: tf.data.Dataset) -> Dict[str, np.ndarray]:
     metrics = {k: tf.contrib.metrics.streaming_concat(v)
                for k, v in tensors.items()}
     initializer = tf.local_variables_initializer()
-    with tf.Session() as sess:
+    with tf.Session(config=_disable_rewrite_config()) as sess:
       return evaluate_metrics(sess, initializer, metrics)
 
 
@@ -360,7 +365,7 @@ def determine_loss_scales(
 
   # predict zero for all derivatives, and a constant value for the integrated
   # solution over time.
-  equation_type = equations.from_hparams(hparams)
+  equation_type = equations.equation_type_from_hparams(hparams)
   num_zero_predictions = len(equation_type.DERIVATIVE_ORDERS) + 1
   labels_shape = data['labels'].shape
   predictions = np.concatenate([
@@ -381,8 +386,10 @@ def determine_loss_scales(
   return error_floor, error_scale
 
 
-def geometric_mean(x: np.ndarray, axis: Union[int, Tuple[int, ...]] = None
-                  ) -> Union[np.ndarray, np.generic]:
+def geometric_mean(
+    x: np.ndarray,
+    axis: Union[int, Tuple[int, ...]] = None
+) -> Union[np.ndarray, np.generic]:
   """Calculate the geometric mean of an array."""
   return np.exp(np.mean(np.log(x), axis))
 
@@ -500,7 +507,7 @@ def metrics_to_dataframe(
 
 
 def _disable_rewrite_config():
-  """TensorFlow config for disabling graph rewrites."""
+  """TensorFlow config for disabling graph rewrites (b/92797692)."""
   off = rewriter_config_pb2.RewriterConfig.OFF
   rewriter_config = rewriter_config_pb2.RewriterConfig(
       disable_model_pruning=True,
@@ -551,7 +558,7 @@ def training_loop(snapshots: np.ndarray,
   logging.info('Variables: %s', '\n'.join(map(str, tf.trainable_variables())))
 
   logged_metrics = []
-  equation_type = equations.from_hparams(hparams)
+  equation_type = equations.equation_type_from_hparams(hparams)
 
   with tf.train.MonitoredTrainingSession(
       master=master,
