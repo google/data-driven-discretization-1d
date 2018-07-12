@@ -402,7 +402,13 @@ def from_hparams(
       exact_grid_size.
   """
   kwargs = json.loads(hparams.equation_kwargs)
-  exact_num_points = kwargs.pop('num_points')
+  exact_num_points = kwargs.pop('num_points', None)
+  if exact_num_points is None:
+    if 'burgers' in hparams.equation.lower():
+      exact_num_points = 400
+      print("using default value of 400 for backqards compatibility")
+    else:
+      raise KeyError('num_points')
 
   num_points, remainder = divmod(exact_num_points, hparams.resample_factor)
   if remainder:
