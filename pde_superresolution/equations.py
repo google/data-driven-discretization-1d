@@ -225,8 +225,7 @@ def staggered_first_derivative(y: T, dx: float) -> T:
   """
   # Use concat instead of roll because roll doesn't have GPU or TPU
   # implementations in TensorFlow
-  y_forward = duckarray.concatenate([y[..., 1:], y[..., :1]], axis=-1)
-  return (1 / dx) * (y_forward - y)
+  return (tf.manip.roll(y,1,1) - tf.manip.roll(y,-1,1))/dx
 
 
 class ConservativeBurgersEquation(BurgersEquation):
