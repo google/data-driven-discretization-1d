@@ -25,11 +25,11 @@ import tempfile
 
 import h5py
 import tensorflow as tf
-from typing import Generator
+from typing import Iterator
 
 
 @contextlib.contextmanager
-def write_h5py(path: str) -> Generator[h5py.File]:
+def write_h5py(path: str) -> Iterator[h5py.File]:
   """Context manager to open an h5py.File for writing."""
   tmp_dir = tempfile.mkdtemp()
   local_path = os.path.join(tmp_dir, 'data.h5')
@@ -40,7 +40,7 @@ def write_h5py(path: str) -> Generator[h5py.File]:
 
 
 @contextlib.contextmanager
-def read_h5py(path: str) -> Generator[h5py.File]:
+def read_h5py(path: str) -> Iterator[h5py.File]:
   """Context manager to open an h5py.File for reading."""
   tmp_dir = tempfile.mkdtemp()
   local_path = os.path.join(tmp_dir, 'data.h5')
