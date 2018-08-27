@@ -344,13 +344,6 @@ def predict_coefficients(inputs: tf.Tensor,
         accuracy_order=hparams.coefficient_grid_min_size,
         dx=equation.grid.solution_dx)
 
-    if hparams.num_layers == 0:
-      # TODO(shoyer): still use PolynomialAccuracyLayer here
-      coefficients = tf.get_variable(
-          'coefficients', (num_derivatives, grid.size))
-      return tf.tile(coefficients[tf.newaxis, tf.newaxis, :, :],
-                     [tf.shape(inputs)[0], inputs.shape[1].value, 1, 1])
-
     net = inputs[:, :, tf.newaxis]
     net /= equation.standard_deviation
 
@@ -362,6 +355,9 @@ def predict_coefficients(inputs: tf.Tensor,
                                          activation=activation, center=True)
 
     if not hparams.polynomial_accuracy_order:
+      if hparams.num_layers == 0:
+        raise NotImplementedError
+
       net = layers.conv1d_periodic_layer(
           net, filters=num_derivatives*grid.size,
           kernel_size=hparams.kernel_size, activation=None, center=True)
@@ -387,9 +383,15 @@ def predict_coefficients(inputs: tf.Tensor,
         )
       input_sizes = [layer.input_size for layer in poly_accuracy_layers]
 
-      net = layers.conv1d_periodic_layer(net, filters=sum(input_sizes),
-                                         kernel_size=hparams.kernel_size,
-                                         activation=None, center=True)
+      if hparams.num_layers > 0:
+        net = layers.conv1d_periodic_layer(net, filters=sum(input_sizes),
+                                           kernel_size=hparams.kernel_size,
+                                           activation=None, center=True)
+      else:
+        coefficients = tf.get_variable('coefficients', (sum(input_sizes),),
+                                       initializer=tf.zeros_initializer())
+        net = tf.tile(coefficients[tf.newaxis, tf.newaxis, :],
+                      [tf.shape(inputs)[0], inputs.shape[1].value, 1])
 
       cum_sizes = np.cumsum(input_sizes)
       starts = [0] + cum_sizes[:-1].tolist()

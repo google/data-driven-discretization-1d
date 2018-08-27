@@ -58,6 +58,7 @@ class TrainingTest(parameterized.TestCase):
       dict(equation='burgers', resample_method='mean'),
       dict(equation='burgers', kernel_size=5, nonlinearity='relu6'),
       dict(equation='burgers', resample_factor=64),
+      dict(equation='burgers', polynomial_accuracy_order=1, num_layers=0),
       *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():
