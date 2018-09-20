@@ -34,7 +34,6 @@ import numbers
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.contrib.integrate.python.ops import odes  # pylint: disable=g-bad-import-order
 from typing import Callable, List, Optional, Union, Dict, Tuple, TypeVar
 
 from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
@@ -65,13 +64,17 @@ def assert_consistent_solution(
 
 def baseline_space_derivatives(
     inputs: tf.Tensor,
-    equation: equations.Equation) -> tf.Tensor:
+    equation: equations.Equation,
+    accuracy_order: int = 1) -> tf.Tensor:
   """Calculate spatial derivatives using standard finite differences."""
   assert_consistent_solution(equation, inputs)
   spatial_derivatives_list = []
   for derivative_order in equation.DERIVATIVE_ORDERS:
     grid = polynomials.regular_finite_difference_grid(
-        equation.GRID_OFFSET, derivative_order, dx=equation.grid.solution_dx)
+        grid_offset=equation.GRID_OFFSET,
+        derivative_order=derivative_order,
+        accuracy_order=accuracy_order,
+        dx=equation.grid.solution_dx)
     spatial_derivatives_list.append(
         polynomials.apply_finite_differences(inputs, grid, derivative_order)
     )
@@ -118,7 +121,8 @@ def integrate_ode(func: Callable[[tf.Tensor, float], tf.Tensor],
     Tensor with shape [batch, x, num_time_steps].
   """
   times = np.arange(num_time_steps + 1) * time_step
-  result = odes.odeint_fixed(func, inputs, times, method='midpoint')
+  result = tf.contrib.integrate.odeint_fixed(
+      func, inputs, times, method='midpoint')
   # drop the first time step, which is exactly equal to the inputs.
   return tf.transpose(result, perm=(1, 2, 0))[..., 1:]
 

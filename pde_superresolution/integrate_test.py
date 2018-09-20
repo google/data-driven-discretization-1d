@@ -105,12 +105,29 @@ class IntegrateTest(parameterized.TestCase):
         equation, times=np.linspace(0, 1, num=11), **kwargs)
     self.assertIsInstance(results, xarray.Dataset)
     self.assertEqual(dict(results.dims), {'time': 11, 'x': 200})
-    self.assertEqual(results['y_exact'].dims, ('time', 'x'))
+    self.assertEqual(results['y'].dims, ('time', 'x'))
 
     # average value should remain near 0
-    y_exact_mean = results.y_exact.mean('x')
+    y_mean = results.y.mean('x')
     xarray.testing.assert_allclose(
-        y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
+        y_mean, xarray.zeros_like(y_mean), atol=1e-3)
+
+  @parameterized.parameters(
+      dict(equation=equations.BurgersEquation(200)),
+      dict(equation=equations.KdVEquation(200)),
+      dict(equation=equations.KSEquation(200), warmup=50.0),
+  )
+  def test_integrate_baseline(self, equation, **kwargs):
+    results = integrate.integrate_baseline(
+        equation, times=np.linspace(0, 1, num=11), **kwargs)
+    self.assertIsInstance(results, xarray.Dataset)
+    self.assertEqual(dict(results.dims), {'time': 11, 'x': 200})
+    self.assertEqual(results['y'].dims, ('time', 'x'))
+
+    # average value should remain near 0
+    y_mean = results.y.mean('x')
+    xarray.testing.assert_allclose(
+        y_mean, xarray.zeros_like(y_mean), atol=1e-3)
 
 
 if __name__ == '__main__':

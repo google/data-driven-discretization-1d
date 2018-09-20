@@ -34,6 +34,9 @@ from pde_superresolution import model  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
 
 
+_DEFAULT_TIMES = np.linspace(0, 10, num=201)
+
+
 class Differentiator(object):
   """Base class for calculating time derivatives."""
 
@@ -72,7 +75,8 @@ class FiniteDifferenceDifferentiator(Differentiator):
   """Calculate derivatives using standard finite difference coefficients."""
 
   def __init__(self,
-               equation: equations.Equation):
+               equation: equations.Equation,
+               accuracy_order: int = 1):
 
     with tf.Graph().as_default():
       self.t = tf.placeholder(tf.float32, shape=())
@@ -82,7 +86,7 @@ class FiniteDifferenceDifferentiator(Differentiator):
 
       batched_inputs = self.inputs[tf.newaxis, :]
       space_derivatives = model.baseline_space_derivatives(
-          batched_inputs, equation)
+          batched_inputs, equation, accuracy_order=accuracy_order)
       time_derivative = tf.squeeze(model.apply_space_derivatives(
           space_derivatives, batched_inputs, equation), axis=0)
       self.value = equation.finalize_time_derivative(self.t, time_derivative)
@@ -175,30 +179,51 @@ def exact_equation_and_differentiator(
   return new_equation, differentiator
 
 
-def integrate_exact(
+def _integrate(
     equation: equations.Equation,
-    times: np.ndarray = np.linspace(0, 10, num=201),
+    differentiator: Differentiator,
+    times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     integrate_method: str = 'RK23') -> xarray.Dataset:
-  """Integrate only the exact model."""
-
+  """Core logic for integrating an equation."""
   if warmup:
     times = times + warmup  # pylint: disable=g-no-augmented-assignment
     exact_times = np.concatenate([[0], times])
   else:
     exact_times = times
 
-  equation, differentiator = exact_equation_and_differentiator(equation)
   solution_exact, num_evals = odeint(
       equation, differentiator, exact_times, method=integrate_method)
   if warmup:
     solution_exact = solution_exact[1:, :]
 
   results = xarray.Dataset(
-      data_vars={'y_exact': (('time', 'x'), solution_exact)},
+      data_vars={'y': (('time', 'x'), solution_exact)},
       coords={'time': times, 'x': equation.grid.solution_x,
               'num_evals': num_evals})
   return results
+
+
+def integrate_exact(
+    equation: equations.Equation,
+    times: np.ndarray = _DEFAULT_TIMES,
+    warmup: float = 0,
+    integrate_method: str = 'RK23') -> xarray.Dataset:
+  """Integrate only the exact model."""
+  equation, differentiator = exact_equation_and_differentiator(equation)
+  return _integrate(equation, differentiator, times, warmup, integrate_method)
+
+
+def integrate_baseline(
+    equation: equations.Equation,
+    times: np.ndarray = _DEFAULT_TIMES,
+    warmup: float = 0,
+    accuracy_order: int = 1,
+    integrate_method: str = 'RK23') -> xarray.Dataset:
+  """Integrate a baseline finite difference model."""
+  differentiator = FiniteDifferenceDifferentiator(
+      equation, accuracy_order=accuracy_order)
+  return _integrate(equation, differentiator, times, warmup, integrate_method)
 
 
 def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
@@ -215,7 +240,7 @@ def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
 def integrate_exact_baseline_and_model(
     checkpoint_dir: str,
     random_seed: int = 0,
-    times: np.ndarray = np.linspace(0, 10, num=201),
+    times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     integrate_method: str = 'RK23') -> xarray.Dataset:
   """Integrate the given PDE with standard and modeled finite differences."""
