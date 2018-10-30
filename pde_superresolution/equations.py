@@ -166,6 +166,12 @@ class RandomForcing(object):
     reference_forcing = duckarray.sum(self.a * signals, axis=0)
     return self.grid.resample(reference_forcing)
 
+  def export(self, path):
+    p = np.zeros_like(self.a)
+    p[0] = self.grid.period
+    p[1] = self.grid.reference_num_points
+    np.savetxt(path, np.array([self.a, self.omega, self.k, self.phi, p]).squeeze())
+
 
 class BurgersEquation(Equation):
   """Burger's equation with random forcing."""
@@ -240,10 +246,12 @@ class ConservativeBurgersEquation(BurgersEquation):
     del y  # unused
     y = spatial_derivatives[0]
     y_x = spatial_derivatives[1]
-    flux = self.eta * y_x - 0.5 * y ** 2
+    flux = self.flux(y, y_x)
     y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
+  def flux(self, y, y_x):
+    return self.eta * y_x - 0.5 * y ** 2
 
 class KdVEquation(Equation):
   """Korteweg-de Vries (KdV) equation with random initial conditions."""

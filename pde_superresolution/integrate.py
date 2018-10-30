@@ -28,7 +28,7 @@ import scipy.integrate
 import tensorflow as tf
 from typing import Tuple
 import xarray
-
+from .WENO import WENO
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import model  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
@@ -109,6 +109,22 @@ class SpectralDifferentiator(Differentiator):
                          for order in self.equation.DERIVATIVE_ORDERS}
     time_derivative = self.equation.equation_of_motion(y, space_derivatives)
     return self.equation.finalize_time_derivative(t, time_derivative)
+
+
+class WENODifferentiator(Differentiator):
+  """Calculate derivatives using a 5th order WENO.py method."""
+
+  def __init__(self, equation: equations.Equation, alpha: float = 1.0, **kwargs):
+    assert isinstance(equation, equations.ConservativeBurgersEquation)
+    self.equation = equation
+    self.weno = WENO(dx=equation.grid.solution_dx)
+
+  def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
+    fd = self.weno.flux_divergence(y)
+    y_t = fd + self.equation.eta * (
+      np.roll(y, 1) + np.roll(y, -1) - (2 * y)
+    )/(self.weno.dx ** 2)  # THIS WORKS ONLY FOR BURGERS and should be inside equations.BurgersEquation
+    return self.equation.finalize_time_derivative(t, y_t)
 
 
 def odeint(equation: equations.Equation,
