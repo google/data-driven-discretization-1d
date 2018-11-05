@@ -26,12 +26,12 @@ import numpy as np
 import scipy.fftpack
 import scipy.integrate
 import tensorflow as tf
-from typing import Tuple
+from typing import Any, Tuple
 import xarray
-from .WENO import WENO
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import model  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
+from pde_superresolution import weno  # pylint: disable=g-bad-import-order
 
 
 _DEFAULT_TIMES = np.linspace(0, 10, num=201)
@@ -112,19 +112,16 @@ class SpectralDifferentiator(Differentiator):
 
 
 class WENODifferentiator(Differentiator):
-  """Calculate derivatives using a 5th order WENO.py method."""
+  """Calculate derivatives using a 5th order WENO method."""
 
-  def __init__(self, equation: equations.Equation, alpha: float = 1.0, **kwargs):
-    assert isinstance(equation, equations.ConservativeBurgersEquation)
+  def __init__(self, equation: equations.ConservativeBurgersEquation,
+               **kwargs: Any):
+    self.weno = weno.WENO(equation, **kwargs)
     self.equation = equation
-    self.weno = WENO(dx=equation.grid.solution_dx)
 
   def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
-    fd = self.weno.flux_divergence(y)
-    y_t = fd + self.equation.eta * (
-      np.roll(y, 1) + np.roll(y, -1) - (2 * y)
-    )/(self.weno.dx ** 2)  # THIS WORKS ONLY FOR BURGERS and should be inside equations.BurgersEquation
-    return self.equation.finalize_time_derivative(t, y_t)
+    time_derivative = self.weno.calculate_time_derivative(y)
+    return self.equation.finalize_time_derivative(t, time_derivative)
 
 
 def odeint(equation: equations.Equation,
@@ -239,6 +236,17 @@ def integrate_baseline(
   """Integrate a baseline finite difference model."""
   differentiator = FiniteDifferenceDifferentiator(
       equation, accuracy_order=accuracy_order)
+  return _integrate(equation, differentiator, times, warmup, integrate_method)
+
+
+def integrate_weno(
+    equation: equations.ConservativeBurgersEquation,
+    times: np.ndarray = _DEFAULT_TIMES,
+    warmup: float = 0,
+    integrate_method: str = 'RK23',
+    **kwargs: Any) -> xarray.Dataset:
+  """Integrate a baseline finite difference model."""
+  differentiator = WENODifferentiator(equation, **kwargs)
   return _integrate(equation, differentiator, times, warmup, integrate_method)
 
 

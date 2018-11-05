@@ -31,6 +31,7 @@ import xarray
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import integrate  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
+from pde_superresolution import weno  # pylint: disable=g-bad-import-order
 
 
 FLAGS = flags.FLAGS
@@ -114,6 +115,7 @@ class IntegrateTest(parameterized.TestCase):
 
   @parameterized.parameters(
       dict(equation=equations.BurgersEquation(200)),
+      dict(equation=equations.ConservativeBurgersEquation(200)),
       dict(equation=equations.KdVEquation(200)),
       dict(equation=equations.KSEquation(200), warmup=50.0),
   )
@@ -129,6 +131,20 @@ class IntegrateTest(parameterized.TestCase):
     xarray.testing.assert_allclose(
         y_mean, xarray.zeros_like(y_mean), atol=1e-3)
 
+  @parameterized.parameters(
+      dict(flux_method=weno.FluxMethod.LAX_FRIEDRICHS),
+      dict(flux_method=weno.FluxMethod.GODUNOV),
+      dict(flux_method=weno.FluxMethod.GODUNOV, k=2, tol=2e-3),
+  )
+  def test_integrate_baseline_and_weno_consistency(self, tol=1e-3, **kwargs):
+    equation = equations.ConservativeBurgersEquation(200)
+
+    results_baseline = integrate.integrate_baseline(
+        equation, times=np.linspace(0, 1, num=11))
+    results_weno = integrate.integrate_weno(
+        equation, times=np.linspace(0, 1, num=11), **kwargs)
+    xarray.testing.assert_allclose(
+        results_baseline, results_weno, rtol=tol, atol=tol)
 
 if __name__ == '__main__':
   absltest.main()

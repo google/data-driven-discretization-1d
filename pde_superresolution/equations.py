@@ -37,7 +37,7 @@ class Grid(object):
   def __init__(self,
                solution_num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'subsample',
+               resample_method: str = 'mean',
                period: float = 1.0):
 
     self.resample_factor = resample_factor
@@ -68,7 +68,7 @@ class Equation(object):
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'subsample',
+               resample_method: str = 'mean',
                period: float = 1.0,
                random_seed: int = 0):
     """Constructor.
@@ -167,10 +167,12 @@ class RandomForcing(object):
     return self.grid.resample(reference_forcing)
 
   def export(self, path):
+    """Export to a text file."""
     p = np.zeros_like(self.a)
     p[0] = self.grid.period
     p[1] = self.grid.reference_num_points
-    np.savetxt(path, np.array([self.a, self.omega, self.k, self.phi, p]).squeeze())
+    array = np.array([self.a, self.omega, self.k, self.phi, p]).squeeze()
+    np.savetxt(path, array)
 
 
 class BurgersEquation(Equation):
@@ -251,7 +253,13 @@ class ConservativeBurgersEquation(BurgersEquation):
     return y_t
 
   def flux(self, y, y_x):
+    """Formula for the flux."""
     return self.eta * y_x - 0.5 * y ** 2
+
+  def flux_derivative(self, y):
+    """Derivative of the flux with respect to the function value."""
+    return -y
+
 
 class KdVEquation(Equation):
   """Korteweg-de Vries (KdV) equation with random initial conditions."""
