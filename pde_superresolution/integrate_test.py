@@ -28,6 +28,7 @@ import numpy as np
 import tensorflow as tf
 import xarray
 
+from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import integrate  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
@@ -60,13 +61,15 @@ class IntegrateTest(parameterized.TestCase):
       dict(equation='ks', conservative=True),
       dict(equation='burgers', warmup=1),
   )
-  def test_integrate_exact_baseline_and_model(self, warmup=0, **hparam_values):
+  def test_integrate_exact_baseline_and_model(
+      self, warmup=0, conservative=False, **hparam_values):
     hparams = training.create_hparams(
         learning_rates=[1e-3],
         learning_stops=[20],
         eval_interval=10,
         equation_kwargs=json.dumps({'num_points': NUM_X_POINTS}),
         resample_method='subsample',
+        conservative=conservative,
         **hparam_values)
     self.train(hparams)
 
@@ -90,7 +93,9 @@ class IntegrateTest(parameterized.TestCase):
         y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
 
     # all solutions should start with the same initial conditions
-    y_exact = results.y_exact.isel(time=0).values[::hparams.resample_factor]
+    resample = duckarray.resample_mean if conservative else duckarray.subsample
+    y_exact = resample(results.y_exact.isel(time=0).values,
+                       hparams.resample_factor)
     np.testing.assert_allclose(
         y_exact, results.y_baseline.isel(time=0).values)
     np.testing.assert_allclose(

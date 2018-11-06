@@ -62,13 +62,13 @@ class Equation(object):
   """Base class for equations to integrate."""
 
   # TODO(shoyer): switch to use ClassVar when pytype supports it (b/72678203)
-  GRID_OFFSET = ...   # type: polynomials.GridOffset
+  CONSERVATIVE = ...  # type: bool
+  GRID_OFFSET = ...  # type: polynomials.GridOffset
   DERIVATIVE_ORDERS = ...  # type: Tuple[int, ...]
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'mean',
                period: float = 1.0,
                random_seed: int = 0):
     """Constructor.
@@ -77,7 +77,6 @@ class Equation(object):
       num_points: number of positions in x at which the equation is solved.
       resample_factor: integer factor by which num_points is resampled from the
         original grid.
-      resample_method: string, either 'mean' or 'subsample'.
       period: period for x. Equation subclasses may set different default
         values appropriate for the equation being solved.
       random_seed: integer random seed for any stochastic aspects of the
@@ -86,6 +85,7 @@ class Equation(object):
     # Note: Ideally we would pass in grid as a construtor argument, but we need
     # different default grids for different equations, so we initialize it here
     # instead.
+    resample_method = 'mean' if self.CONSERVATIVE else 'subsample'
     self.grid = Grid(num_points, resample_factor, resample_method, period)
     self.random_seed = random_seed
 
@@ -178,19 +178,19 @@ class RandomForcing(object):
 class BurgersEquation(Equation):
   """Burger's equation with random forcing."""
 
+  CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 2)
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'subsample',
                period: float = 2 * np.pi,
                random_seed: int = 0,
                eta: float = 0.04,
                k_max: int = 3):
     super(BurgersEquation, self).__init__(
-        num_points, resample_factor, resample_method, period, random_seed)
+        num_points, resample_factor, period, random_seed)
     self.forcing = RandomForcing(self.grid, seed=random_seed, k_max=k_max)
     self.eta = eta
     self.k_max = k_max
@@ -240,6 +240,7 @@ def staggered_first_derivative(y: T, dx: float) -> T:
 class ConservativeBurgersEquation(BurgersEquation):
   """Burgers constrained to obey the continuity equation."""
 
+  CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
   DERIVATIVE_ORDERS = (0, 1)
 
@@ -264,17 +265,17 @@ class ConservativeBurgersEquation(BurgersEquation):
 class KdVEquation(Equation):
   """Korteweg-de Vries (KdV) equation with random initial conditions."""
 
+  CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 3)
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'subsample',
                period: float = 50,
                random_seed: int = 0):
     super(KdVEquation, self).__init__(
-        num_points, resample_factor, resample_method, period, random_seed)
+        num_points, resample_factor, period, random_seed)
     self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
 
   def initial_value(self) -> np.ndarray:
@@ -301,6 +302,7 @@ class KdVEquation(Equation):
 class ConservativeKdVEquation(KdVEquation):
   """KdV constrained to obey the continuity equation."""
 
+  CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
   DERIVATIVE_ORDERS = (0, 2)
 
@@ -317,17 +319,17 @@ class ConservativeKdVEquation(KdVEquation):
 class KSEquation(Equation):
   """Kuramoto-Sivashinsky (KS) equation with random initial conditions."""
 
+  CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   DERIVATIVE_ORDERS = (1, 2, 4)
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               resample_method: str = 'subsample',
                period: float = 100,
                random_seed: int = 0):
     super(KSEquation, self).__init__(
-        num_points, resample_factor, resample_method, period, random_seed)
+        num_points, resample_factor, period, random_seed)
     self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
 
   @property
@@ -355,6 +357,7 @@ class KSEquation(Equation):
 class ConservativeKSEquation(KSEquation):
   """KS constrained to obey the continuity equation."""
 
+  CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
   DERIVATIVE_ORDERS = (0, 1, 3)
 
@@ -434,7 +437,6 @@ def from_hparams(
   coarse_equation = equation_type(
       num_points,
       resample_factor=hparams.resample_factor,
-      resample_method=hparams.resample_method,
       random_seed=random_seed,
       **kwargs)
 

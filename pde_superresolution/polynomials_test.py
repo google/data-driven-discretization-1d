@@ -25,6 +25,10 @@ import numpy as np
 from pde_superresolution import polynomials
 
 
+FINITE_DIFF = polynomials.Method.FINITE_DIFFERENCES
+FINITE_VOL = polynomials.Method.FINITE_VOLUMES
+
+
 class PolynomialsTest(parameterized.TestCase):
 
   # For test-cases, see
@@ -35,34 +39,56 @@ class PolynomialsTest(parameterized.TestCase):
       dict(grid=[-2, -1, 0, 1, 2], derivative_order=2,
            expected=[-1/12, 4/3, -5/2, 4/3, -1/12]),
       dict(grid=[0, 1], derivative_order=1, expected=[-1, 1]),
+      dict(grid=[0, 2], derivative_order=1, expected=[-0.5, 0.5]),
+      dict(grid=[0, 0.5], derivative_order=1, expected=[-2, 2]),
       dict(grid=[0, 1, 2, 3, 4], derivative_order=4,
            expected=[1, -4, 6, -4, 1]),
   )
   def test_finite_difference_coefficients(
       self, grid, derivative_order, expected):
-    result = polynomials.finite_difference_coefficients(
-        np.array(grid), derivative_order)
+    result = polynomials.coefficients(
+        np.array(grid), FINITE_DIFF, derivative_order)
+    np.testing.assert_allclose(result, expected)
+
+  # based in part on the WENO tutorial
+  @parameterized.parameters(
+      dict(grid=[-0.5, 0.5], derivative_order=0, expected=[1/2, 1/2]),
+      dict(grid=[-1, 1], derivative_order=0, expected=[1/2, 1/2]),
+      dict(grid=[-1.5, -0.5], derivative_order=0, expected=[-1/2, 3/2]),
+      dict(grid=[-0.5, 0.5, 1.5], derivative_order=0,
+           expected=[1/3, 5/6, -1/6]),
+      dict(grid=[-0.5, 0.5], derivative_order=1, expected=[-1, 1]),
+      dict(grid=[-1, 1], derivative_order=1, expected=[-1/2, 1/2]),
+      dict(grid=[0.5, 1.5, 2.5], derivative_order=1, expected=[-2, 3, -1]),
+      dict(grid=[-1.5, -0.5, 0.5, 1.5], derivative_order=1,
+           expected=[1/12, -5/4, 5/4, -1/12]),
+  )
+  def test_finite_volume_coefficients(
+      self, grid, derivative_order, expected):
+    result = polynomials.coefficients(
+        np.array(grid), FINITE_VOL, derivative_order)
     np.testing.assert_allclose(result, expected)
 
   def test_finite_difference_constraints(self):
     # first and second order accuracy should be identical constraints
     grid = np.array([-1, 0, 1])
-    a1, b1 = polynomials.finite_difference_constraints(
-        grid, derivative_order=1, accuracy_order=1)
-    a1, b1 = polynomials.finite_difference_constraints(
-        grid, derivative_order=1, accuracy_order=2)
+    a1, b1 = polynomials.constraints(
+        grid, FINITE_DIFF, derivative_order=1, accuracy_order=1)
+    a1, b1 = polynomials.constraints(
+        grid, FINITE_DIFF, derivative_order=1, accuracy_order=2)
     np.testing.assert_allclose(a1, a1)
     np.testing.assert_allclose(b1, b1)
 
   @parameterized.parameters(
-      dict(grid=[-2, -1, 0, 1, 2], derivative_order=1, accuracy_order=2),
-      dict(grid=[-2, -1, 0, 1, 2], derivative_order=2, accuracy_order=2),
-      dict(grid=[-1.5, -0.5, 0.5, 1.5], derivative_order=1, accuracy_order=2),
+      dict(grid=[-2, -1, 0, 1, 2], method=FINITE_DIFF, derivative_order=1),
+      dict(grid=[-2, -1, 0, 1, 2], method=FINITE_DIFF, derivative_order=2),
+      dict(grid=[-1.5, -0.5, 0.5, 1.5], method=FINITE_DIFF, derivative_order=1),
+      dict(grid=[-1.5, -0.5, 0.5, 1.5], method=FINITE_VOL, derivative_order=1),
   )
   def test_polynomial_accuracy_layer_consistency(
-      self, grid, derivative_order, accuracy_order):
-    args = (np.array(grid), derivative_order, accuracy_order)
-    A, b = polynomials.finite_difference_constraints(*args)  # pylint: disable=invalid-name
+      self, grid, method, derivative_order, accuracy_order=2):
+    args = (np.array(grid), method, derivative_order, accuracy_order)
+    A, b = polynomials.constraints(*args)  # pylint: disable=invalid-name
     layer = polynomials.PolynomialAccuracyLayer(*args)
 
     inputs = np.random.RandomState(0).randn(10, layer.input_size)
@@ -108,9 +134,9 @@ class PolynomialsTest(parameterized.TestCase):
            grid_offset=polynomials.GridOffset.STAGGERED,
            expected_grid=[-2.5, -1.5, -0.5, 0.5, 1.5, 2.5]),
   )
-  def test_regular_finite_difference_grid(
+  def test_regular_grid(
       self, grid_offset, derivative_order, expected_grid, accuracy_order=1):
-    actual_grid = polynomials.regular_finite_difference_grid(
+    actual_grid = polynomials.regular_grid(
         grid_offset, derivative_order, accuracy_order)
     np.testing.assert_allclose(actual_grid, expected_grid)
 

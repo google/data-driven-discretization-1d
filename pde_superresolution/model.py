@@ -45,6 +45,10 @@ from pde_superresolution import polynomials  # pylint: disable=g-bad-import-orde
 TensorLike = Union[tf.Tensor, np.ndarray, numbers.Number]  # pylint: disable=invalid-name
 
 
+FINITE_DIFF = polynomials.Method.FINITE_DIFFERENCES
+FINITE_VOL = polynomials.Method.FINITE_VOLUMES
+
+
 def assert_consistent_solution(
     equation: equations.Equation, solution: tf.Tensor):
   """Verify that a solution is consistent with the underlying equation.
@@ -70,13 +74,14 @@ def baseline_space_derivatives(
   assert_consistent_solution(equation, inputs)
   spatial_derivatives_list = []
   for derivative_order in equation.DERIVATIVE_ORDERS:
-    grid = polynomials.regular_finite_difference_grid(
+    grid = polynomials.regular_grid(
         grid_offset=equation.GRID_OFFSET,
         derivative_order=derivative_order,
         accuracy_order=accuracy_order,
         dx=equation.grid.solution_dx)
+    method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
     spatial_derivatives_list.append(
-        polynomials.apply_finite_differences(inputs, grid, derivative_order)
+        polynomials.reconstruct(inputs, grid, method, derivative_order)
     )
   return tf.stack(spatial_derivatives_list, axis=-1)
 
@@ -343,7 +348,7 @@ def predict_coefficients(inputs: tf.Tensor,
   with tf.variable_scope('predict_coefficients', reuse=reuse):
     num_derivatives = len(equation.DERIVATIVE_ORDERS)
 
-    grid = polynomials.regular_finite_difference_grid(
+    grid = polynomials.regular_grid(
         equation.GRID_OFFSET, derivative_order=0,
         accuracy_order=hparams.coefficient_grid_min_size,
         dx=equation.grid.solution_dx)
@@ -378,9 +383,11 @@ def predict_coefficients(inputs: tf.Tensor,
     else:
       poly_accuracy_layers = []
       for derivative_order in equation.DERIVATIVE_ORDERS:
+        method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
         poly_accuracy_layers.append(
             polynomials.PolynomialAccuracyLayer(
                 grid=grid,
+                method=method,
                 derivative_order=derivative_order,
                 accuracy_order=hparams.polynomial_accuracy_order,
                 out_scale=hparams.polynomial_accuracy_scale)

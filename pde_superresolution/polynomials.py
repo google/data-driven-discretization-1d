@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Polynomial based models for finite differences."""
+"""Polynomial based models for finite differences and finite volumes."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -34,7 +34,13 @@ class GridOffset(enum.Enum):
   STAGGERED = 2
 
 
-def regular_finite_difference_grid(
+class Method(enum.Enum):
+  """Discretization method."""
+  FINITE_DIFFERENCES = 1
+  FINITE_VOLUMES = 2
+
+
+def regular_grid(
     grid_offset: GridOffset,
     derivative_order: int,
     accuracy_order: int = 1,
@@ -65,15 +71,18 @@ def regular_finite_difference_grid(
   return grid
 
 
-def finite_difference_constraints(
+def constraints(
     grid: np.ndarray,
+    method: Method,
     derivative_order: int,
     accuracy_order: int = None) -> Tuple[np.ndarray, np.ndarray]:
   """Setup the linear equation A @ c = b for finite difference coefficients.
 
   Args:
     grid: grid on which to calculate the finite difference stencil, relative
-      to the point at which to approximate the derivative.
+      to the point at which to approximate the derivative. The grid must be
+      regular.
+    method: discretization method.
     derivative_order: integer derivative order to approximate.
     accuracy_order: minimum accuracy order for the solution.
 
@@ -98,20 +107,33 @@ def finite_difference_constraints(
     # accuracy.)
     accuracy_order = grid.size - derivative_order
 
-  if accuracy_order < 0:
-    raise ValueError('cannot compute a finite difference stencil with '
-                     'negative accuracy_order: {}'.format(accuracy_order))
+  if accuracy_order < 1:
+    raise ValueError('cannot compute constriants with non-positive '
+                     'accuracy_order: {}'.format(accuracy_order))
+
+  deltas = np.unique(np.diff(grid))
+  if len(deltas) > 1:
+    raise ValueError('not a regular grid: {}'.format(deltas))
+  (delta,) = deltas
 
   zero_constraints = set()
   for m in range(accuracy_order + derivative_order):
     if m != derivative_order:
-      zero_constraints.add(tuple(grid ** m))
+      if method is Method.FINITE_DIFFERENCES:
+        constraint = grid ** m
+      elif method is Method.FINITE_VOLUMES:
+        constraint = (((grid + delta/2) ** (m + 1)
+                       - (grid - delta/2) ** (m + 1))
+                      / (m + 1))
+      else:
+        raise ValueError('unexpected method: {}'.format(method))
+      zero_constraints.add(tuple(constraint))
 
   num_constraints = len(zero_constraints) + 1
   if num_constraints > grid.size:
-    raise ValueError('no finite difference stencil exists for '
-                     'derivative_order={} and accuracy_order={} with grid={}'
-                     .format(derivative_order, accuracy_order, grid))
+    raise ValueError('no valid {} stencil exists for derivative_order={} and '
+                     'accuracy_order={} with grid={}'
+                     .format(method, derivative_order, accuracy_order, grid))
 
   A = np.array(sorted(zero_constraints) + [grid ** derivative_order])  # pylint: disable=invalid-name
 
@@ -121,19 +143,21 @@ def finite_difference_constraints(
   return A, b
 
 
-def finite_difference_coefficients(
+def coefficients(
     grid: np.ndarray,
+    method: Method,
     derivative_order: int) -> np.ndarray:
   """Calculate standard finite difference coefficients for the given grid.
 
   Args:
     grid: grid on which to calculate finite difference coefficients.
+    method: discretization method.
     derivative_order: integer derivative order to approximate.
 
   Returns:
     NumPy array giving finite difference coefficients on the grid.
   """
-  A, b = finite_difference_constraints(grid, derivative_order)  # pylint: disable=invalid-name
+  A, b = constraints(grid, method, derivative_order)  # pylint: disable=invalid-name
   return np.linalg.solve(A, b)
 
 
@@ -150,6 +174,7 @@ class PolynomialAccuracyLayer(object):
 
   def __init__(self,
                grid: np.ndarray,
+               method: Method,
                derivative_order: int,
                accuracy_order: int = 2,
                bias: np.ndarray = None,
@@ -158,6 +183,7 @@ class PolynomialAccuracyLayer(object):
 
     Args:
       grid: grid on which to calculate finite difference coefficients.
+      method: discretization method.
       derivative_order: integer derivative order to approximate.
       accuracy_order: integer order of polynomial accuracy to enforce.
       bias: np.ndarray of shape (grid_size,) to which zero-vectors will be
@@ -167,11 +193,10 @@ class PolynomialAccuracyLayer(object):
       out_scale: desired multiplicative scaling on the outputs, relative to the
         bias.
     """
-    A, b = finite_difference_constraints(  # pylint: disable=invalid-name
-        grid, derivative_order, accuracy_order)
+    A, b = constraints(grid, method, derivative_order, accuracy_order)  # pylint: disable=invalid-name
 
     if bias is None:
-      bias = finite_difference_coefficients(grid, derivative_order)
+      bias = coefficients(grid, method, derivative_order)
 
     norm = np.linalg.norm(np.dot(A, bias) - b)
     if norm > 1e-8:
@@ -212,15 +237,17 @@ class PolynomialAccuracyLayer(object):
     return bias + tf.einsum('bxi,ij->bxj', inputs, nullspace)
 
 
-def apply_finite_differences(
+def reconstruct(
     inputs: tf.Tensor,
     grid: np.ndarray,
+    method: Method,
     derivative_order: int) -> tf.Tensor:
-  """Calculate central finite differences using the standard tables.
+  """Calculate finite difference/volumes using the standard tables.
 
   Args:
     inputs: tf.Tensor with dimensions [batch, x].
     grid: grid on which to calculate finite difference coefficients.
+    method: discretization method.
     derivative_order: integer derivative order to calculate.
 
   Returns:
@@ -228,7 +255,7 @@ def apply_finite_differences(
     to spatial derivatives at each point.
   """
   filters = tf.convert_to_tensor(
-      finite_difference_coefficients(grid, derivative_order),
+      coefficients(grid, method, derivative_order),
       dtype=tf.float32)
   convolved = layers.nn_conv1d_periodic(
       inputs[..., tf.newaxis], filters[..., tf.newaxis, tf.newaxis],
