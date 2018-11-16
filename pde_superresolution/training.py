@@ -108,10 +108,10 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       resample_factor=4,
       # neural network parameters
       num_layers=3,
-      filter_size=128,
-      kernel_size=3,
+      filter_size=32,
+      kernel_size=5,
       nonlinearity='relu',
-      polynomial_accuracy_order=2,
+      polynomial_accuracy_order=1,
       polynomial_accuracy_scale=1.0,
       ensure_unbiased_coefficients=False,
       coefficient_grid_min_size=6,
@@ -127,10 +127,10 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       error_scale=[np.nan],  # set by set_data_dependent_hparams
       error_floor=[np.nan],  # set by set_data_dependent_hparams
       absolute_error_weight=1.0,
-      relative_error_weight=1.0,
-      space_derivatives_weight=1.0,
+      relative_error_weight=0.0,
+      space_derivatives_weight=0.0,
       time_derivative_weight=1.0,
-      integrated_solution_weight=1.0,
+      integrated_solution_weight=0.0,
   )
   hparams.override_from_dict(kwargs)
   return hparams
