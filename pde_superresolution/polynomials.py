@@ -112,9 +112,9 @@ def constraints(
                      'accuracy_order: {}'.format(accuracy_order))
 
   deltas = np.unique(np.diff(grid))
-  if len(deltas) > 1:
+  if (abs(deltas - deltas[0]) > 1e-8).any():
     raise ValueError('not a regular grid: {}'.format(deltas))
-  (delta,) = deltas
+  delta = deltas[0]
 
   zero_constraints = set()
   for m in range(accuracy_order + derivative_order):

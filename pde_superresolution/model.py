@@ -257,8 +257,9 @@ def model_inputs(fine_inputs: tf.Tensor,
     - 'inputs': float32 Tensor with shape [batch, x//factor] with low resolution
        inputs.
   """
-  resample = duckarray.RESAMPLE_FUNCS[hparams.resample_method]
   fine_equation, coarse_equation = equations.from_hparams(hparams)
+  resample_method = 'mean' if coarse_equation.CONSERVATIVE else 'subsample'
+  resample = duckarray.RESAMPLE_FUNCS[resample_method]
 
   fine_derivatives = baseline_result(fine_inputs, fine_equation,
                                      hparams.num_time_steps)

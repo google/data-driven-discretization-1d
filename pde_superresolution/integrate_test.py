@@ -38,6 +38,7 @@ from pde_superresolution import weno  # pylint: disable=g-bad-import-order
 FLAGS = flags.FLAGS
 
 NUM_X_POINTS = 256
+RANDOM_SEED = 0
 
 
 class IntegrateTest(parameterized.TestCase):
@@ -60,21 +61,23 @@ class IntegrateTest(parameterized.TestCase):
       dict(equation='kdv', conservative=True),
       dict(equation='ks', conservative=True),
       dict(equation='burgers', warmup=1),
+      dict(equation='burgers', warmup=1, conservative=True),
   )
   def test_integrate_exact_baseline_and_model(
-      self, warmup=0, conservative=False, **hparam_values):
+      self, warmup=0, conservative=False, resample_factor=4, **hparam_values):
     hparams = training.create_hparams(
         learning_rates=[1e-3],
         learning_stops=[20],
         eval_interval=10,
         equation_kwargs=json.dumps({'num_points': NUM_X_POINTS}),
-        resample_method='subsample',
         conservative=conservative,
+        resample_factor=resample_factor,
         **hparam_values)
     self.train(hparams)
 
     results = integrate.integrate_exact_baseline_and_model(
         self.checkpoint_dir,
+        random_seed=RANDOM_SEED,
         times=np.linspace(0, 1, num=11),
         warmup=warmup)
 
@@ -82,24 +85,37 @@ class IntegrateTest(parameterized.TestCase):
     self.assertEqual(dict(results.dims),
                      {'time': 11,
                       'x_high': NUM_X_POINTS,
-                      'x_low': NUM_X_POINTS // 4})
+                      'x_low': NUM_X_POINTS // resample_factor})
     self.assertEqual(results['y_exact'].dims, ('time', 'x_high'))
     self.assertEqual(results['y_baseline'].dims, ('time', 'x_low'))
     self.assertEqual(results['y_model'].dims, ('time', 'x_low'))
 
-    # average value should remain near 0
-    y_exact_mean = results.y_exact.mean('x_high')
-    xarray.testing.assert_allclose(
-        y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
+    with self.subTest('average should be zero'):
+      y_exact_mean = results.y_exact.mean('x_high')
+      xarray.testing.assert_allclose(
+          y_exact_mean, xarray.zeros_like(y_exact_mean), atol=1e-3)
 
-    # all solutions should start with the same initial conditions
-    resample = duckarray.resample_mean if conservative else duckarray.subsample
-    y_exact = resample(results.y_exact.isel(time=0).values,
-                       hparams.resample_factor)
-    np.testing.assert_allclose(
-        y_exact, results.y_baseline.isel(time=0).values)
-    np.testing.assert_allclose(
-        y_exact, results.y_model.isel(time=0).values)
+    with self.subTest('matching initial conditions'):
+      if conservative:
+        resample = duckarray.resample_mean
+      else:
+        resample = duckarray.subsample
+      y_exact = resample(results.y_exact.isel(time=0).values,
+                         resample_factor)
+      np.testing.assert_allclose(
+          y_exact, results.y_baseline.isel(time=0).values)
+      np.testing.assert_allclose(
+          y_exact, results.y_model.isel(time=0).values)
+
+    with self.subTest('matches integrate_baseline'):
+      equation_type = equations.equation_type_from_hparams(hparams)
+      equation = equation_type(NUM_X_POINTS//resample_factor,
+                               resample_factor=resample_factor,
+                               random_seed=RANDOM_SEED)
+      results2 = integrate.integrate_baseline(
+          equation, times=np.linspace(0, 1, num=11), warmup=warmup)
+      np.testing.assert_allclose(
+          results['y_baseline'].data, results2['y'].data, atol=1e-3)
 
   @parameterized.parameters(
       dict(equation=equations.BurgersEquation(200)),
@@ -113,10 +129,10 @@ class IntegrateTest(parameterized.TestCase):
     self.assertEqual(dict(results.dims), {'time': 11, 'x': 200})
     self.assertEqual(results['y'].dims, ('time', 'x'))
 
-    # average value should remain near 0
-    y_mean = results.y.mean('x')
-    xarray.testing.assert_allclose(
-        y_mean, xarray.zeros_like(y_mean), atol=1e-3)
+    with self.subTest('average should be zero'):
+      y_mean = results.y.mean('x')
+      xarray.testing.assert_allclose(
+          y_mean, xarray.zeros_like(y_mean), atol=1e-3)
 
   @parameterized.parameters(
       dict(equation=equations.BurgersEquation(200)),

@@ -44,9 +44,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       variant of this equation or not.
     resample_factor: integer factor by which to upscale from low to high
       resolution. Must evenly divide the high resolution grid.
-    resample_method: string, either 'mean' or 'subsample'.
     equation_kwargs: JSON encoded string with equation specific keyword
-      arguments, excluding resample_factor, resample_method and random_seed.
+      arguments, excluding resample_factor and random_seed.
 
   Neural network parameters:
     num_layers: integer number of conv1d layers to use for coefficient
@@ -107,7 +106,6 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       conservative=True,
       equation_kwargs='{}',
       resample_factor=4,
-      resample_method='mean',
       # neural network parameters
       num_layers=3,
       filter_size=128,

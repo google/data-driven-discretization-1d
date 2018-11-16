@@ -55,7 +55,6 @@ class TrainingTest(parameterized.TestCase):
       dict(equation='burgers', polynomial_accuracy_order=0),
       dict(equation='ks', coefficient_grid_min_size=9),
       dict(equation='ks', polynomial_accuracy_order=0),
-      dict(equation='burgers', resample_method='mean'),
       dict(equation='burgers', kernel_size=5, nonlinearity='relu6'),
       dict(equation='burgers', resample_factor=64),
       dict(equation='burgers', polynomial_accuracy_order=1, num_layers=0),

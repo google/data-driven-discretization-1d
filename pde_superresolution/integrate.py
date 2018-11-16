@@ -71,7 +71,7 @@ class SavedModelDifferentiator(Differentiator):
     return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
 
 
-class FiniteDifferenceDifferentiator(Differentiator):
+class PolynomialDifferentiator(Differentiator):
   """Calculate derivatives using standard finite difference coefficients."""
 
   def __init__(self,
@@ -169,21 +169,21 @@ def exact_equation_and_differentiator(
   """
   if isinstance(equation, equations.BurgersEquation):
     new_equation = equations.ConservativeBurgersEquation(
-        equation.grid.solution_num_points,
+        equation.grid.reference_num_points,
         period=equation.grid.period,
         random_seed=equation.random_seed,
         eta=equation.eta,
         k_max=equation.k_max)
-    differentiator = FiniteDifferenceDifferentiator(new_equation)
+    differentiator = PolynomialDifferentiator(new_equation)
   elif isinstance(equation, equations.KdVEquation):
     new_equation = equations.KdVEquation(
-        equation.grid.solution_num_points,
+        equation.grid.reference_num_points,
         period=equation.grid.period,
         random_seed=equation.random_seed)
     differentiator = SpectralDifferentiator(new_equation)
   elif isinstance(equation, equations.KSEquation):
     new_equation = equations.KSEquation(
-        equation.grid.solution_num_points,
+        equation.grid.reference_num_points,
         period=equation.grid.period,
         random_seed=equation.random_seed)
     differentiator = SpectralDifferentiator(new_equation)
@@ -199,20 +199,22 @@ def _integrate(
     warmup: float = 0,
     integrate_method: str = 'RK23') -> xarray.Dataset:
   """Core logic for integrating an equation."""
-  if warmup:
-    times = times + warmup  # pylint: disable=g-no-augmented-assignment
-    exact_times = np.concatenate([[0], times])
-  else:
-    exact_times = times
 
-  solution_exact, num_evals = odeint(
-      equation, differentiator, exact_times, method=integrate_method)
   if warmup:
-    solution_exact = solution_exact[1:, :]
+    equation_exact, diff_exact = exact_equation_and_differentiator(equation)
+    warmup_times = np.array([0, warmup])
+    solution_warmup, _ = odeint(
+        equation_exact, diff_exact, warmup_times, method=integrate_method)
+    y0 = equation.grid.resample(solution_warmup[1, :])
+  else:
+    y0 = None
+
+  solution, num_evals = odeint(
+      equation, differentiator, warmup+times, y0=y0, method=integrate_method)
 
   results = xarray.Dataset(
-      data_vars={'y': (('time', 'x'), solution_exact)},
-      coords={'time': times, 'x': equation.grid.solution_x,
+      data_vars={'y': (('time', 'x'), solution)},
+      coords={'time': warmup+times, 'x': equation.grid.solution_x,
               'num_evals': num_evals})
   return results
 
@@ -234,7 +236,7 @@ def integrate_baseline(
     accuracy_order: int = 1,
     integrate_method: str = 'RK23') -> xarray.Dataset:
   """Integrate a baseline finite difference model."""
-  differentiator = FiniteDifferenceDifferentiator(
+  differentiator = PolynomialDifferentiator(
       equation, accuracy_order=accuracy_order)
   return _integrate(equation, differentiator, times, warmup, integrate_method)
 
@@ -295,7 +297,7 @@ def integrate_exact_baseline_and_model(
     y0 = None
 
   logging.info('solving baseline finite differences at low resolution')
-  differentiator = FiniteDifferenceDifferentiator(equation_coarse)
+  differentiator = PolynomialDifferentiator(equation_coarse)
   solution_baseline, num_evals_baseline = odeint(
       equation_coarse, differentiator, times, y0=y0, method=integrate_method)
 

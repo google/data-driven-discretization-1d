@@ -20,6 +20,7 @@ import enum
 import numpy as np
 
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
+from pde_superresolution import polynomials  # pylint: disable=g-bad-import-order
 
 
 # constants for k=2 and k=3
@@ -56,6 +57,11 @@ _WEIGHTS_D = {
     2: np.array([[1/3, 2/3]]).T,
     3: np.array([[0.1, 0.6, 0.3]]).T,
 }
+
+UX_4_POINT = polynomials.coefficients(
+    np.array([1.5, 0.5, -0.5, -1.5]),
+    polynomials.Method.FINITE_VOLUMES,
+    derivative_order=1)
 
 
 class FluxMethod(enum.Enum):
@@ -104,8 +110,14 @@ class WENO(object):
     d = _WEIGHTS_D[self.k]
     u_minus = self.reconstruction(np.roll(u, -1), p, s, d)
     u_plus = self.reconstruction(u, p[::-1, ::-1], s, d[::-1])
-    # TODO(shoyer): implement higher order stencils for du/dx
-    u_x = (np.roll(u, -1) - u) / self.dx
+
+    if self.k == 2:
+      u_x = (np.roll(u, -1) - u) / self.dx
+    elif self.k == 3:
+      u_x = (np.roll(u, -2) * UX_4_POINT[0]
+             + np.roll(u, -1) * UX_4_POINT[1]
+             + u * UX_4_POINT[2]
+             + np.roll(u, 1) * UX_4_POINT[3]) / self.dx
 
     if self.flux_method is FluxMethod.LAX_FRIEDRICHS:
       # flux at +1/2 cells
