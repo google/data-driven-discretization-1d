@@ -73,6 +73,23 @@ def reshape(x: T, shape: Sequence[int]) -> T:
     return np.reshape(x, shape)
 
 
+def rfft(x: T) -> T:
+  return tf.spectral.rfft(x) if isinstance(x, tf.Tensor) else np.fft.rfft(x)
+
+
+def irfft(x: T) -> T:
+  return tf.spectral.ifft(x) if isinstance(x, tf.Tensor) else np.fft.irfft(x)
+
+
+def spectral_derivative(x: T, order: int = 1, period: float = 2*np.pi) -> T:
+  """Differentiate along the last axis of x using a Fourier transform."""
+  if get_shape(x)[-1] % 2:
+    raise ValueError('spectral derivative only works for even length data')
+  c = 2*np.pi*1j / period
+  k = np.fft.rfftfreq(x.size, d=1/x.size)
+  return irfft((c * k) ** order * rfft(x))
+
+
 def _normalize_axis(axis: int, shape: Tuple[int]):
   ndim = len(shape)
   if not -ndim <= axis < ndim:
