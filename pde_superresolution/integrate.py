@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import os
 
 from absl import logging
@@ -26,8 +27,9 @@ import numpy as np
 import scipy.fftpack
 import scipy.integrate
 import tensorflow as tf
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 import xarray
+from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import model  # pylint: disable=g-bad-import-order
 from pde_superresolution import training  # pylint: disable=g-bad-import-order
@@ -76,7 +78,7 @@ class PolynomialDifferentiator(Differentiator):
 
   def __init__(self,
                equation: equations.Equation,
-               accuracy_order: int = 1):
+               accuracy_order: Optional[int] = 1):
 
     with tf.Graph().as_default():
       self.t = tf.placeholder(tf.float32, shape=())
@@ -124,16 +126,12 @@ class WENODifferentiator(Differentiator):
     return self.equation.finalize_time_derivative(t, time_derivative)
 
 
-def odeint(equation: equations.Equation,
+def odeint(y0: np.ndarray,
            differentiator: Differentiator,
            times: np.ndarray,
-           y0: np.ndarray = None,
            method: str = 'RK23') -> Tuple[np.ndarray, int]:
   """Integrate an ODE."""
-  logging.info('solve_ivp for %s from %s to %s', equation, times[0], times[-1])
-
-  if y0 is None:
-    y0 = equation.initial_value()
+  logging.info('solve_ivp from %s to %s', times[0], times[-1])
 
   # Most of our equations are somewhat stiff, so lower order Runga-Kutta is a
   # sane default. For whatever reason, the stiff solvers are much slower when
@@ -157,60 +155,104 @@ def odeint(equation: equations.Equation,
   return y, sol.nfev
 
 
-def exact_equation_and_differentiator(
-    equation: equations.Equation) -> Tuple[equations.Equation, Differentiator]:
+def odeint_with_periodic_filtering(
+    y0: np.ndarray,
+    differentiator: Differentiator,
+    times: np.ndarray,
+    filter_interval: float,
+    filter_order: int,
+    method: str = 'RK23'):
+  """Integrate with periodic filtering."""
+
+  # Spectral methods for hyperbolic problems can suffer from aliasing artifacts,
+  # which can be alleviated by applying a low-pass (smoothing) filter. See
+  # Sections 4.2 and 5 of:
+  #   Hesthaven, J. S. 2016. "Spectral Methods for Hyperbolic Problems." In
+  #   Handbook of Numerical Analysis, edited by Remi Abgrall and Chi-Wang Shu,
+  #   17:441-66. Elsevier.
+  #   https://infoscience.epfl.ch/record/221484/files/SpecHandBook.pdf
+
+  eps = 1e-8
+  split_times = np.arange(times[0], times[-1] + eps, filter_interval)
+  if not np.isin(split_times, times).all():
+    raise ValueError('all times in filter_interval must be sampled')
+  split_indexes = np.searchsorted(times, split_times, side='right')
+
+  y_list = [y0[np.newaxis, ...]]
+
+  num_evals = 0
+  for start_index, end_index in zip(split_indexes[:-1], split_indexes[1:]):
+    cur_times = times[start_index-1:end_index]
+    y, cur_num_evals = odeint(y0, differentiator, cur_times, method=method)
+    y_list.append(y[1:])  # exclude y0
+    y0 = duckarray.smoothing_filter(y[-1], order=filter_order)
+    num_evals += cur_num_evals
+
+  y = np.concatenate(y_list, axis=0)
+  assert y.shape == (times.size, y0.size)
+
+  # apply the filter again for post-processing
+  # note: applying the filter at each time step during integration adds noise
+  y = duckarray.smoothing_filter(y, order=filter_order)
+
+  return y, num_evals
+
+
+def exact_differentiator(
+    equation: equations.Equation) -> Differentiator:
   """Return an "exact" differentiator for the given equation.
 
   Args:
-    equation: equation for which to produce an "exact" variant.
+    equation: equation for which to produce an "exact" differentiator.
 
   Returns:
-    Equation and differentiator to use for "exact" integration.
+    Differentiator to use for "exact" integration.
   """
-  if isinstance(equation, equations.BurgersEquation):
-    new_equation = equations.ConservativeBurgersEquation(
-        equation.grid.reference_num_points,
-        period=equation.grid.period,
-        random_seed=equation.random_seed,
-        eta=equation.eta,
-        k_max=equation.k_max)
-    differentiator = PolynomialDifferentiator(new_equation)
-  elif isinstance(equation, equations.KdVEquation):
-    new_equation = equations.KdVEquation(
-        equation.grid.reference_num_points,
-        period=equation.grid.period,
-        random_seed=equation.random_seed)
-    differentiator = SpectralDifferentiator(new_equation)
-  elif isinstance(equation, equations.KSEquation):
-    new_equation = equations.KSEquation(
-        equation.grid.reference_num_points,
-        period=equation.grid.period,
-        random_seed=equation.random_seed)
-    differentiator = SpectralDifferentiator(new_equation)
+  if equation.BASELINE is equations.Baseline.POLYNOMIAL:
+    differentiator = PolynomialDifferentiator(equation, accuracy_order=None)
+  elif equation.BASELINE is equations.Baseline.SPECTRAL:
+    differentiator = SpectralDifferentiator(equation)
   else:
     raise TypeError('unexpected equation: {}'.format(equation))
-  return new_equation, differentiator
+  return differentiator
 
 
-def _integrate(
+def integrate(
     equation: equations.Equation,
     differentiator: Differentiator,
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
-    integrate_method: str = 'RK23') -> xarray.Dataset:
-  """Core logic for integrating an equation."""
+    integrate_method: str = 'RK23',
+    filter_interval: float = None,
+    filter_all_times: bool = False) -> xarray.Dataset:
+  """Integrate an equation with possible warmup or periodic filtering."""
+
+  if filter_interval is not None:
+    warmup_odeint = functools.partial(
+        odeint_with_periodic_filtering,
+        filter_interval=filter_interval,
+        filter_order=max(equation.to_exact().DERIVATIVE_ORDERS))
+  else:
+    warmup_odeint = odeint
 
   if warmup:
-    equation_exact, diff_exact = exact_equation_and_differentiator(equation)
-    warmup_times = np.array([0, warmup])
-    solution_warmup, _ = odeint(
-        equation_exact, diff_exact, warmup_times, method=integrate_method)
-    y0 = equation.grid.resample(solution_warmup[1, :])
+    equation_exact = equation.to_exact()
+    diff_exact = exact_differentiator(equation_exact)
+    if filter_interval is not None:
+      warmup_times = np.arange(0, warmup + 1e-8, filter_interval)
+    else:
+      warmup_times = np.array([0, warmup])
+    y0_0 = equation_exact.initial_value()
+    solution_warmup, _ = warmup_odeint(
+        y0_0, diff_exact, times=warmup_times, method=integrate_method)
+    # use the sample after warmup to initialize later simulations
+    y0 = equation.grid.resample(solution_warmup[-1, :])
   else:
-    y0 = None
+    y0 = equation.initial_value()
 
-  solution, num_evals = odeint(
-      equation, differentiator, warmup+times, y0=y0, method=integrate_method)
+  odeint_func = warmup_odeint if filter_all_times else odeint
+  solution, num_evals = odeint_func(
+      y0, differentiator, times=warmup+times, method=integrate_method)
 
   results = xarray.Dataset(
       data_vars={'y': (('time', 'x'), solution)},
@@ -223,10 +265,15 @@ def integrate_exact(
     equation: equations.Equation,
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
-    integrate_method: str = 'RK23') -> xarray.Dataset:
+    integrate_method: str = 'RK23',
+    filter_interval: float = None) -> xarray.Dataset:
   """Integrate only the exact model."""
-  equation, differentiator = exact_equation_and_differentiator(equation)
-  return _integrate(equation, differentiator, times, warmup, integrate_method)
+  equation = equation.to_exact()
+  differentiator = exact_differentiator(equation)
+  return integrate(equation, differentiator, times, warmup,
+                   integrate_method=integrate_method,
+                   filter_interval=filter_interval,
+                   filter_all_times=True)
 
 
 def integrate_baseline(
@@ -234,11 +281,15 @@ def integrate_baseline(
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     accuracy_order: int = 1,
-    integrate_method: str = 'RK23') -> xarray.Dataset:
+    integrate_method: str = 'RK23',
+    exact_filter_interval: float = None) -> xarray.Dataset:
   """Integrate a baseline finite difference model."""
   differentiator = PolynomialDifferentiator(
       equation, accuracy_order=accuracy_order)
-  return _integrate(equation, differentiator, times, warmup, integrate_method)
+  return integrate(equation, differentiator, times, warmup,
+                   integrate_method=integrate_method,
+                   filter_interval=exact_filter_interval,
+                   filter_all_times=False)
 
 
 def integrate_weno(
@@ -249,7 +300,8 @@ def integrate_weno(
     **kwargs: Any) -> xarray.Dataset:
   """Integrate a baseline finite difference model."""
   differentiator = WENODifferentiator(equation, **kwargs)
-  return _integrate(equation, differentiator, times, warmup, integrate_method)
+  return integrate(equation, differentiator, times, warmup,
+                   integrate_method=integrate_method)
 
 
 def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
@@ -268,52 +320,46 @@ def integrate_exact_baseline_and_model(
     random_seed: int = 0,
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
-    integrate_method: str = 'RK23') -> xarray.Dataset:
+    integrate_method: str = 'RK23',
+    exact_filter_interval: float = None) -> xarray.Dataset:
   """Integrate the given PDE with standard and modeled finite differences."""
   hparams = load_hparams(checkpoint_dir)
 
   logging.info('integrating %s with seed=%s', hparams.equation, random_seed)
-
-  if warmup:
-    times = times + warmup  # pylint: disable=g-no-augmented-assignment
-    exact_times = np.concatenate([[0], times])
-  else:
-    exact_times = times
-
   equation_exact, equation_coarse = equations.from_hparams(
       hparams, random_seed=random_seed)
 
   logging.info('solving the "exact" model at high resolution')
-  equation_exact, differentiator = exact_equation_and_differentiator(
-      equation_exact)
-  solution_exact, num_evals_exact = odeint(
-      equation_exact, differentiator, exact_times, method=integrate_method)
+  ds_solution_exact = integrate_exact(
+      equation_exact, times, warmup, integrate_method=integrate_method,
+      filter_interval=exact_filter_interval)
+  solution_exact = ds_solution_exact['y'].data
+  num_evals_exact = ds_solution_exact['num_evals'].item()
 
-  if warmup:
-    # use the sample after warmup to initialize later simulations
-    y0 = equation_coarse.grid.resample(solution_exact[1, :])
-    solution_exact = solution_exact[1:, :]
-  else:
-    y0 = None
+  # resample to the coarse grid
+  y0 = equation_coarse.grid.resample(solution_exact[0, :])
+
+  if np.isnan(y0).any():
+    raise ValueError('solution contains NaNs')
 
   logging.info('solving baseline finite differences at low resolution')
   differentiator = PolynomialDifferentiator(equation_coarse)
   solution_baseline, num_evals_baseline = odeint(
-      equation_coarse, differentiator, times, y0=y0, method=integrate_method)
+      y0, differentiator, warmup+times, method=integrate_method)
 
   logging.info('solving neural network model at low resolution')
   checkpoint_path = training.checkpoint_dir_to_path(checkpoint_dir)
   differentiator = SavedModelDifferentiator(
       checkpoint_path, equation_coarse, hparams)
   solution_model, num_evals_model = odeint(
-      equation_coarse, differentiator, times, y0=y0, method=integrate_method)
+      y0, differentiator, warmup+times, method=integrate_method)
 
   results = xarray.Dataset({
       'y_exact': (('time', 'x_high'), solution_exact),
       'y_baseline': (('time', 'x_low'), solution_baseline),
       'y_model': (('time', 'x_low'), solution_model),
   }, coords={
-      'time': times,
+      'time': warmup+times,
       'x_low': equation_coarse.grid.solution_x,
       'x_high': equation_exact.grid.solution_x,
       'num_evals_exact': num_evals_exact,

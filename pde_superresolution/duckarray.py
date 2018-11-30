@@ -78,19 +78,36 @@ def rfft(x: T) -> T:
 
 
 def irfft(x: T) -> T:
-  return tf.spectral.ifft(x) if isinstance(x, tf.Tensor) else np.fft.irfft(x)
+  return tf.spectral.irfft(x) if isinstance(x, tf.Tensor) else np.fft.irfft(x)
 
 
 def spectral_derivative(x: T, order: int = 1, period: float = 2*np.pi) -> T:
   """Differentiate along the last axis of x using a Fourier transform."""
-  if get_shape(x)[-1] % 2:
+  length = get_shape(x)[-1]
+  if length % 2:
     raise ValueError('spectral derivative only works for even length data')
   c = 2*np.pi*1j / period
-  k = np.fft.rfftfreq(x.size, d=1/x.size)
+  k = np.fft.rfftfreq(length, d=1/length)
   return irfft((c * k) ** order * rfft(x))
 
 
-def _normalize_axis(axis: int, shape: Tuple[int]):
+def smoothing_filter(x: T,
+                     alpha: float = -np.log(1e-15),
+                     order: int = 2) -> T:
+  """Apply a low-pass smoothing filter to remove noise."""
+  # Based on:
+  # Gottlieb and Hesthaven (2001), "Spectral methods for hyperbolic problems"
+  # https://doi.org/10.1016/S0377-0427(00)00510-0
+  length = get_shape(x)[-1]
+  if length % 2:
+    raise ValueError('smoothing filter only works for even length data')
+  count = length // 2
+  eta = np.arange(count+1) / count
+  sigma = np.exp(-alpha * eta**(2*order))
+  return irfft(sigma * rfft(x))
+
+
+def _normalize_axis(axis: int, shape: Tuple[int]) -> int:
   ndim = len(shape)
   if not -ndim <= axis < ndim:
     raise ValueError('invalid axis {} for shape {}'.format(axis, shape))

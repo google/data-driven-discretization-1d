@@ -62,9 +62,13 @@ class IntegrateTest(parameterized.TestCase):
       dict(equation='ks', conservative=True),
       dict(equation='burgers', warmup=1),
       dict(equation='burgers', warmup=1, conservative=True),
+      dict(equation='kdv', warmup=1, conservative=True),
+      dict(equation='kdv', warmup=1, conservative=True,
+           exact_filter_interval=1),
   )
   def test_integrate_exact_baseline_and_model(
-      self, warmup=0, conservative=False, resample_factor=4, **hparam_values):
+      self, warmup=0, conservative=False, resample_factor=4,
+      exact_filter_interval=None, **hparam_values):
     hparams = training.create_hparams(
         learning_rates=[1e-3],
         learning_stops=[20],
@@ -79,7 +83,8 @@ class IntegrateTest(parameterized.TestCase):
         self.checkpoint_dir,
         random_seed=RANDOM_SEED,
         times=np.linspace(0, 1, num=11),
-        warmup=warmup)
+        warmup=warmup,
+        exact_filter_interval=exact_filter_interval)
 
     self.assertIsInstance(results, xarray.Dataset)
     self.assertEqual(dict(results.dims),
@@ -109,13 +114,14 @@ class IntegrateTest(parameterized.TestCase):
 
     with self.subTest('matches integrate_baseline'):
       equation_type = equations.equation_type_from_hparams(hparams)
+      assert equation_type.CONSERVATIVE == conservative
       equation = equation_type(NUM_X_POINTS//resample_factor,
                                resample_factor=resample_factor,
                                random_seed=RANDOM_SEED)
       results2 = integrate.integrate_baseline(
           equation, times=np.linspace(0, 1, num=11), warmup=warmup)
       np.testing.assert_allclose(
-          results['y_baseline'].data, results2['y'].data, atol=1e-3)
+          results['y_baseline'].data, results2['y'].data, atol=1e-5)
 
   @parameterized.parameters(
       dict(equation=equations.BurgersEquation(200)),

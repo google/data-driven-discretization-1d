@@ -32,6 +32,7 @@ from __future__ import print_function
 
 import numbers
 
+import enum
 import numpy as np
 import tensorflow as tf
 from typing import Callable, List, Optional, Union, Dict, Tuple, TypeVar
@@ -69,20 +70,38 @@ def assert_consistent_solution(
 def baseline_space_derivatives(
     inputs: tf.Tensor,
     equation: equations.Equation,
-    accuracy_order: int = 1) -> tf.Tensor:
-  """Calculate spatial derivatives using standard finite differences."""
+    accuracy_order: int = None) -> tf.Tensor:
+  """Calculate spatial derivatives using a baseline metohd."""
   assert_consistent_solution(equation, inputs)
+
   spatial_derivatives_list = []
   for derivative_order in equation.DERIVATIVE_ORDERS:
-    grid = polynomials.regular_grid(
-        grid_offset=equation.GRID_OFFSET,
-        derivative_order=derivative_order,
-        accuracy_order=accuracy_order,
-        dx=equation.grid.solution_dx)
-    method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
-    spatial_derivatives_list.append(
-        polynomials.reconstruct(inputs, grid, method, derivative_order)
-    )
+
+    if accuracy_order is None:
+      # use the best baseline method
+      if equation.BASELINE is equations.Baseline.POLYNOMIAL:
+        grid = (0.5 + np.arange(-3, 3)) * equation.grid.solution_dx
+        method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
+        derivative = polynomials.reconstruct(
+            inputs, grid, method, derivative_order)
+      elif equation.BASELINE is equations.Baseline.SPECTRAL:
+        derivative = duckarray.spectral_derivative(
+            inputs, derivative_order, equation.grid.period)
+      else:
+        raise AssertionError('unknown baseline method')
+
+    else:
+      # explicit accuracy order provided
+      grid = polynomials.regular_grid(
+          grid_offset=equation.GRID_OFFSET,
+          derivative_order=derivative_order,
+          accuracy_order=accuracy_order,
+          dx=equation.grid.solution_dx)
+      method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
+      derivative = polynomials.reconstruct(
+          inputs, grid, method, derivative_order)
+
+    spatial_derivatives_list.append(derivative)
   return tf.stack(spatial_derivatives_list, axis=-1)
 
 
@@ -151,7 +170,7 @@ def baseline_time_evolution(
   def func(y, t):
     del t  # unused
     return apply_space_derivatives(
-        baseline_space_derivatives(y, equation), y, equation)
+        baseline_space_derivatives(y, equation, accuracy_order=1), y, equation)
 
   return integrate_ode(func, inputs, num_time_steps, equation.time_step)
 
@@ -215,20 +234,23 @@ def _stack_all_rolls(inputs: tf.Tensor, max_offset: int) -> tf.Tensor:
 
 def baseline_result(inputs: tf.Tensor,
                     equation: equations.Equation,
-                    num_time_steps: int = 0) -> tf.Tensor:
+                    num_time_steps: int = 0,
+                    accuracy_order: int = None) -> tf.Tensor:
   """Calculate derivatives and time-evolution using our baseline model.
 
   Args:
     inputs: float32 Tensor with dimensions [batch, x].
     equation: equation being solved.
     num_time_steps: integer number of time steps to integrate over.
+    accuracy_order: optional explicit accuracy order.
 
   Returns:
     Float32 Tensor with dimensions [batch, x, channel] with inferred space
     derivatives, time derivative and the integrated solution.
   """
   # TODO(shoyer): use a neural network to filter inputs, too.
-  space_derivatives = baseline_space_derivatives(inputs, equation)
+  space_derivatives = baseline_space_derivatives(
+      inputs, equation, accuracy_order=accuracy_order)
   time_derivative = apply_space_derivatives(
       space_derivatives, inputs, equation)
   if num_time_steps:
@@ -239,14 +261,34 @@ def baseline_result(inputs: tf.Tensor,
   return result_stack(space_derivatives, time_derivative, integrated_solution)
 
 
+def apply_noise(
+    inputs: tf.Tensor,
+    probability: float = 1.0,
+    amplitude: float = 1.0,
+    filtered: bool = False,
+) -> tf.Tensor:
+  """Apply noise to improve robustness."""
+  # The idea is to mimic the artifacts introducted by numerical integration.
+  keep = tf.expand_dims(tf.cast(
+      tf.random.uniform((tf.shape(inputs)[0],)) <= probability,
+      tf.float32), axis=1)
+  noise = tf.random.normal(tf.shape(inputs))
+  if filtered:
+    noise = noise - duckarray.smoothing_filter(noise)
+  return inputs + keep * amplitude * noise
+
+
 def model_inputs(fine_inputs: tf.Tensor,
-                 hparams: tf.contrib.training.HParams) -> Dict[str, tf.Tensor]:
+                 hparams: tf.contrib.training.HParams,
+                 evaluation: bool = False) -> Dict[str, tf.Tensor]:
   """Create coarse model inputs from high resolution simulations.
 
   Args:
     fine_inputs: float32 Tensor with shape [batch, x] with results of
       high-resolution simulations.
     hparams: model hyperparameters.
+    evaluation: bool indicating whether to create data for evaluation or
+      model training.
 
   Returns:
     Dict of tensors with entries:
@@ -258,33 +300,63 @@ def model_inputs(fine_inputs: tf.Tensor,
        inputs.
   """
   fine_equation, coarse_equation = equations.from_hparams(hparams)
+  assert fine_equation.grid.resample_factor == 1
   resample_method = 'mean' if coarse_equation.CONSERVATIVE else 'subsample'
   resample = duckarray.RESAMPLE_FUNCS[resample_method]
 
+  if evaluation:
+    ground_truth_order = None
+  else:
+    if hparams.ground_truth_order == -1:
+      ground_truth_order = None
+    else:
+      ground_truth_order = hparams.ground_truth_order
+
   fine_derivatives = baseline_result(fine_inputs, fine_equation,
-                                     hparams.num_time_steps)
+                                     hparams.num_time_steps,
+                                     accuracy_order=ground_truth_order)
   labels = resample(fine_derivatives, factor=hparams.resample_factor, axis=1)
 
   coarse_inputs = resample(fine_inputs, factor=hparams.resample_factor, axis=1)
   baseline = baseline_result(coarse_inputs, coarse_equation,
-                             hparams.num_time_steps)
+                             hparams.num_time_steps, accuracy_order=1)
+
+  if not evaluation and hparams.noise_probability:
+    if hparams.noise_type == 'white':
+      filtered = False
+    elif hparams.noise_type == 'filtered':
+      filtered = True
+    else:
+      raise ValueError('invalid noise_type: {}'.format(hparams.noise_type))
+
+    coarse_inputs = apply_noise(
+        coarse_inputs, hparams.noise_probability, hparams.noise_amplitude,
+        filtered=filtered)
 
   return {'labels': labels, 'baseline': baseline, 'inputs': coarse_inputs}
 
 
+@enum.unique
+class Dataset(enum.Enum):
+  TRAINING = 0
+  VALIDATION = 1
+
+
 def make_dataset(snapshots: np.ndarray,
                  hparams: tf.contrib.training.HParams,
-                 training: bool = True,
-                 repeat: bool = True) -> tf.data.Dataset:
+                 dataset_type: Dataset = Dataset.TRAINING,
+                 repeat: bool = True,
+                 evaluation: bool = False) -> tf.data.Dataset:
   """Create a tf.data.Dataset for training or evaluation data.
 
   Args:
     snapshots: np.ndarray with shape [examples, x] with high-resolution
       training data.
     hparams: model hyperparameters.
-    training: bool indicating whether to provide training or validation data.
-    repeat: bool indicating whether the Dataset should repeat indefinitely or
-      not.
+    dataset_type: enum indicating whether to use training or validation data.
+    repeat: whether to shuffle and repeat data.
+    evaluation: bool indicating whether to create data for evaluation or
+      model training.
 
   Returns:
     tf.data.Dataset containing a dictionary with three tensor values:
@@ -298,7 +370,11 @@ def make_dataset(snapshots: np.ndarray,
   snapshots = np.asarray(snapshots, dtype=np.float32)
 
   num_training = int(round(snapshots.shape[0] * hparams.frac_training))
-  indexer = slice(None, num_training) if training else slice(num_training, None)
+  if dataset_type is Dataset.TRAINING:
+    indexer = slice(None, num_training)
+  else:
+    assert dataset_type is Dataset.VALIDATION
+    indexer = slice(num_training, None)
 
   dataset = tf.data.Dataset.from_tensor_slices(snapshots[indexer])
   dataset = dataset.map(lambda x: _stack_all_rolls(x, hparams.resample_factor))
@@ -310,7 +386,7 @@ def make_dataset(snapshots: np.ndarray,
 
   batch_size = hparams.base_batch_size * hparams.resample_factor
   dataset = dataset.batch(batch_size)
-  dataset = dataset.map(lambda x: model_inputs(x, hparams))
+  dataset = dataset.map(lambda x: model_inputs(x, hparams, evaluation))
   dataset = dataset.prefetch(buffer_size=1)
   return dataset
 

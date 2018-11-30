@@ -17,7 +17,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import enum
 import json
+
 import numpy as np
 import tensorflow as tf
 from typing import Mapping, Tuple, Type, TypeVar
@@ -29,6 +31,13 @@ from pde_superresolution import polynomials  # pylint: disable=g-bad-import-orde
 # TODO(shoyer): replace with TypeVar('T', np.ndarray, tf.Tensor) when pytype
 # supports it (b/74212131)
 T = TypeVar('T')
+
+
+@enum.unique
+class Baseline(enum.Enum):
+  """Relationship between successive grids."""
+  POLYNOMIAL = 1
+  SPECTRAL = 2
 
 
 class Grid(object):
@@ -64,6 +73,7 @@ class Equation(object):
   # TODO(shoyer): switch to use ClassVar when pytype supports it (b/72678203)
   CONSERVATIVE = ...  # type: bool
   GRID_OFFSET = ...  # type: polynomials.GridOffset
+  BASELINE = ...  # type: Baseline
   DERIVATIVE_ORDERS = ...  # type: Tuple[int, ...]
 
   def __init__(self,
@@ -141,6 +151,10 @@ class Equation(object):
     del t  # unused
     return y_t
 
+  def to_exact(self) -> 'Equation':
+    """Convert into an exact equation."""
+    raise NotImplementedError
+
 
 class RandomForcing(object):
   """Deterministic random forcing for Burger's equation."""
@@ -180,6 +194,7 @@ class BurgersEquation(Equation):
 
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
+  BASELINE = Baseline.POLYNOMIAL
   DERIVATIVE_ORDERS = (1, 2)
 
   def __init__(self,
@@ -217,6 +232,14 @@ class BurgersEquation(Equation):
 
   def finalize_time_derivative(self, t: float, y_t: tf.Tensor) -> tf.Tensor:
     return y_t + self.forcing(t)
+
+  def to_exact(self):
+    return ConservativeBurgersEquation(
+        self.grid.reference_num_points,
+        period=self.grid.period,
+        random_seed=self.random_seed,
+        eta=self.eta,
+        k_max=self.k_max)
 
 
 def staggered_first_derivative(y: T, dx: float) -> T:
@@ -267,6 +290,7 @@ class KdVEquation(Equation):
 
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
+  BASELINE = Baseline.SPECTRAL
   DERIVATIVE_ORDERS = (1, 3)
 
   def __init__(self,
@@ -298,6 +322,12 @@ class KdVEquation(Equation):
     y_t = -6.0 * y * y_x - y_xxx
     return y_t
 
+  def to_exact(self):
+    return KdVEquation(
+        self.grid.reference_num_points,
+        period=self.grid.period,
+        random_seed=self.random_seed)
+
 
 class ConservativeKdVEquation(KdVEquation):
   """KdV constrained to obey the continuity equation."""
@@ -321,6 +351,7 @@ class KSEquation(Equation):
 
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
+  BASELINE = Baseline.SPECTRAL
   DERIVATIVE_ORDERS = (1, 2, 4)
 
   def __init__(self,
@@ -352,6 +383,12 @@ class KSEquation(Equation):
     y_xxxx = spatial_derivatives[4]
     y_t = -y*y_x - y_xxxx - y_xx
     return y_t
+
+  def to_exact(self):
+    return KSEquation(
+        self.grid.reference_num_points,
+        period=self.grid.period,
+        random_seed=self.random_seed)
 
 
 class ConservativeKSEquation(KSEquation):
@@ -429,15 +466,11 @@ def from_hparams(
                      .format(hparams.resample_factor, exact_num_points))
 
   equation_type = equation_type_from_hparams(hparams)
-  fine_equation = equation_type(
-      exact_num_points,
-      resample_factor=1,
-      random_seed=random_seed,
-      **kwargs)
   coarse_equation = equation_type(
       num_points,
       resample_factor=hparams.resample_factor,
       random_seed=random_seed,
       **kwargs)
+  fine_equation = coarse_equation.to_exact()
 
   return fine_equation, coarse_equation

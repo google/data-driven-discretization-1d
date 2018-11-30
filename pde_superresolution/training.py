@@ -73,7 +73,19 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       validation.
     eval_interval: integer training step frequency at which to run evaluation.
 
+  Noise parameters
+    noise_probability: float probability of adding noise to input data for any
+      particular example during training.
+    noise_amplitude: float amplitude of Gaussian noise to add to input data
+      during training.
+    noise_type: string 'white' or 'filtered' indicating the type of noise to
+      apply.
+
   Loss parameters:
+    ground_truth_order: polynomial accuracy order to use for creating ground-
+      truth labels used in the loss. -1 is a special sentinel value indicating
+      "maximum accuracy", i.e., a six-point stencil for Burgers' equation and
+      a spectral method for KdV and KS.
     num_time_steps: integer number of integration time steps to include in the
       loss.
     error_floor_quantile: float quantile to use for the error floor.
@@ -121,7 +133,11 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       learning_stops=[20000, 40000],
       frac_training=0.8,
       eval_interval=250,
+      noise_probability=0.0,
+      noise_amplitude=0.0,
+      noise_type='white',
       # loss parameters
+      ground_truth_order=-1,
       num_time_steps=0,
       error_floor_quantile=0.1,
       error_scale=[np.nan],  # set by set_data_dependent_hparams
@@ -202,7 +218,8 @@ def setup_training(
   Returns:
     Tensors for the current loss, and for taking a training step.
   """
-  dataset = model.make_dataset(snapshots, hparams)
+  dataset = model.make_dataset(snapshots, hparams,
+                               dataset_type=model.Dataset.TRAINING)
   tensors = dataset.make_one_shot_iterator().get_next()
 
   predictions = model.predict_result(tensors['inputs'], hparams)
@@ -235,8 +252,12 @@ class Inferer(object):
       hparams: hyperparameters for training.
       training: whether to evaluate on training or validation datasets.
     """
-    dataset = model.make_dataset(snapshots, hparams, training=training,
-                                 repeat=False)
+    if training:
+      dataset_type = model.Dataset.TRAINING
+    else:
+      dataset_type = model.Dataset.VALIDATION
+    dataset = model.make_dataset(snapshots, hparams, dataset_type=dataset_type,
+                                 repeat=False, evaluation=True)
     iterator = dataset.make_initializable_iterator()
     data = iterator.get_next()
 
@@ -353,7 +374,7 @@ def determine_loss_scales(
         for each derivative target.
       error_floor: numpy array with scale for weighting of relative errors.
   """
-  dataset = model.make_dataset(snapshots, hparams, training=True, repeat=False)
+  dataset = model.make_dataset(snapshots, hparams, repeat=False)
   data = load_dataset(dataset)
 
   baseline_error = (data['labels'] - data['baseline']) ** 2
