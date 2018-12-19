@@ -345,13 +345,13 @@ def load_dataset(dataset: tf.data.Dataset) -> Dict[str, np.ndarray]:
   Returns:
     Dict of numpy arrays with concatenated data from the full input dataset.
   """
-  with tf.Graph().as_default():
-    tensors = dataset.make_one_shot_iterator().get_next()
-    metrics = {k: tf.contrib.metrics.streaming_concat(v)
-               for k, v in tensors.items()}
-    initializer = tf.local_variables_initializer()
-    with tf.Session(config=_disable_rewrite_config()) as sess:
-      return evaluate_metrics(sess, initializer, metrics)
+  tensors = dataset.make_one_shot_iterator().get_next()
+  metrics = {
+      k: tf.contrib.metrics.streaming_concat(v) for k, v in tensors.items()
+  }
+  initializer = tf.local_variables_initializer()
+  with tf.Session(config=_disable_rewrite_config()) as sess:
+    return evaluate_metrics(sess, initializer, metrics)
 
 
 def determine_loss_scales(
@@ -374,8 +374,9 @@ def determine_loss_scales(
         for each derivative target.
       error_floor: numpy array with scale for weighting of relative errors.
   """
-  dataset = model.make_dataset(snapshots, hparams, repeat=False)
-  data = load_dataset(dataset)
+  with tf.Graph().as_default():
+    dataset = model.make_dataset(snapshots, hparams, repeat=False)
+    data = load_dataset(dataset)
 
   baseline_error = (data['labels'] - data['baseline']) ** 2
   percentile = 100 * hparams.error_floor_quantile
