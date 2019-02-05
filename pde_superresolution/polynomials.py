@@ -116,18 +116,24 @@ def constraints(
     raise ValueError('not a regular grid: {}'.format(deltas))
   delta = deltas[0]
 
+  final_constraint = None
   zero_constraints = set()
   for m in range(accuracy_order + derivative_order):
-    if m != derivative_order:
-      if method is Method.FINITE_DIFFERENCES:
-        constraint = grid ** m
-      elif method is Method.FINITE_VOLUMES:
-        constraint = (((grid + delta/2) ** (m + 1)
+    if method is Method.FINITE_DIFFERENCES:
+      constraint = grid ** m
+    elif method is Method.FINITE_VOLUMES:
+      constraint = (1 / delta
+                    * ((grid + delta/2) ** (m + 1)
                        - (grid - delta/2) ** (m + 1))
-                      / (m + 1))
-      else:
-        raise ValueError('unexpected method: {}'.format(method))
+                    / (m + 1))
+    else:
+      raise ValueError('unexpected method: {}'.format(method))
+    if m == derivative_order:
+      final_constraint = constraint
+    else:
       zero_constraints.add(tuple(constraint))
+
+  assert final_constraint is not None
 
   num_constraints = len(zero_constraints) + 1
   if num_constraints > grid.size:
@@ -135,7 +141,7 @@ def constraints(
                      'accuracy_order={} with grid={}'
                      .format(method, derivative_order, accuracy_order, grid))
 
-  A = np.array(sorted(zero_constraints) + [grid ** derivative_order])  # pylint: disable=invalid-name
+  A = np.array(sorted(zero_constraints) + [final_constraint])  # pylint: disable=invalid-name
 
   b = np.zeros(A.shape[0])
   b[-1] = scipy.special.factorial(derivative_order)

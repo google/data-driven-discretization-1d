@@ -57,11 +57,15 @@ class PolynomialsTest(parameterized.TestCase):
       dict(grid=[-1.5, -0.5], derivative_order=0, expected=[-1/2, 3/2]),
       dict(grid=[-0.5, 0.5, 1.5], derivative_order=0,
            expected=[1/3, 5/6, -1/6]),
+      dict(grid=[-0.25, 0.25, 0.75], derivative_order=0,
+           expected=[1/3, 5/6, -1/6]),
       dict(grid=[-0.5, 0.5], derivative_order=1, expected=[-1, 1]),
       dict(grid=[-1, 1], derivative_order=1, expected=[-1/2, 1/2]),
       dict(grid=[0.5, 1.5, 2.5], derivative_order=1, expected=[-2, 3, -1]),
       dict(grid=[-1.5, -0.5, 0.5, 1.5], derivative_order=1,
            expected=[1/12, -5/4, 5/4, -1/12]),
+      dict(grid=[-.75, -0.25, 0.25, 0.75], derivative_order=1,
+           expected=[1/6, -5/2, 5/2, -1/6]),
   )
   def test_finite_volume_coefficients(
       self, grid, derivative_order, expected):
