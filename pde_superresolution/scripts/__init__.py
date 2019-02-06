@@ -12,16 +12,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Code for PDE-superresolution."""
-from pde_superresolution import analysis
-from pde_superresolution import duckarray
-from pde_superresolution import equations
-from pde_superresolution import integrate
-from pde_superresolution import layers
-from pde_superresolution import model
-from pde_superresolution import polynomials
-from pde_superresolution import training
-from pde_superresolution import utils
-from pde_superresolution import weno
-# xarray_beam is not imported by default, to ensure beam remains an optional
-# dependency
