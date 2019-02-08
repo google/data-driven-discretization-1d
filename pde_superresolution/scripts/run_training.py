@@ -30,9 +30,14 @@ from pde_superresolution import training  # pylint: disable=g-bad-import-order
 from pde_superresolution import utils  # pylint: disable=g-bad-import-order
 
 
+# NOTE(shoyer): allow_override=True lets us import multiple binaries for the
+# purpose of running integration tests. This is safe since we're strict about
+# only using FLAGS inside main().
+
 flags.DEFINE_string(
-    'checkpoint_dir', None,
-    'Directory to use for saving model')
+    'checkpoint_dir', '',
+    'Directory to use for saving model',
+    allow_override=True)
 flags.DEFINE_string(
     'input_path', None,
     'Path to HDF5 file with input data.')
@@ -56,7 +61,7 @@ def main(unused_argv):
   logging.info('Loading training data')
   with utils.read_h5py(FLAGS.input_path) as f:
     snapshots = f['v'][...]
-    equation_kwargs = dict(f.attrs)
+    equation_kwargs = {k: v.item() for k, v in f.attrs.items()}
 
   logging.info('Inputs have shape %r', snapshots.shape)
 
@@ -81,4 +86,7 @@ def main(unused_argv):
 
 
 if __name__ == '__main__':
+  flags.mark_flag_as_required('checkpoint_dir')
+  flags.mark_flag_as_required('input_path')
+  flags.mark_flag_as_required('equation')
   app.run(main)

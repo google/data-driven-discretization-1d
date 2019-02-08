@@ -32,6 +32,10 @@ import tensorflow as tf
 import xarray
 
 
+# NOTE(shoyer): allow_override=True lets us import multiple binaries for the
+# purpose of running integration tests. This is safe since we're strict about
+# only using FLAGS inside main().
+
 # files
 flags.DEFINE_string(
     'output_path', None,
@@ -40,7 +44,7 @@ flags.DEFINE_string(
 # equation parameters
 flags.DEFINE_enum(
     'equation_name', 'burgers', list(equations.CONSERVATIVE_EQUATION_TYPES),
-    'Equation to integrate.')
+    'Equation to integrate.', allow_override=True)
 flags.DEFINE_string(
     'equation_hparams', '{"num_points": 400}',
     'Parameters to pass to the equation constructor.')
@@ -56,19 +60,24 @@ flags.DEFINE_integer(
 # integrate parameters
 flags.DEFINE_float(
     'time_max', 10,
-    'Total time for which to run each integration.')
+    'Total time for which to run each integration.',
+    allow_override=True)
 flags.DEFINE_float(
     'time_delta', 1,
-    'Difference between saved time steps in the integration.')
+    'Difference between saved time steps in the integration.',
+    allow_override=True)
 flags.DEFINE_float(
     'warmup', 0,
-    'Amount of time to integrate before using the neural network.')
+    'Amount of time to integrate before saving snapshots.',
+    allow_override=True)
 flags.DEFINE_string(
     'integrate_method', 'RK23',
-    'Method to use for integration with scipy.integrate.solve_ivp.')
+    'Method to use for integration with scipy.integrate.solve_ivp.',
+    allow_override=True)
 flags.DEFINE_float(
     'exact_filter_interval', 0,
-    'Interval between periodic filtering. Only used for spectral methods.')
+    'Interval between periodic filtering. Only used for spectral methods.',
+    allow_override=True)
 
 
 FLAGS = flags.FLAGS
