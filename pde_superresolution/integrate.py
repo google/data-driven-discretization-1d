@@ -21,8 +21,6 @@ import functools
 import os
 
 from absl import logging
-from google.protobuf import text_format  # pylint: disable=g-bad-import-order
-from tensorflow.contrib.training.python.training import hparam_pb2  # pylint: disable=g-bad-import-order
 import numpy as np
 import scipy.fftpack
 import scipy.integrate
@@ -304,26 +302,18 @@ def integrate_weno(
                    integrate_method=integrate_method)
 
 
-def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
-  """Load hyperparameters saved by training.py."""
-  hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')
-  hparam_def = hparam_pb2.HParamDef()
-  with tf.gfile.GFile(hparams_path, 'r') as f:
-    text_format.Merge(f.read(), hparam_def)
-  hparams = tf.contrib.training.HParams(hparam_def)
-  # Set any new hparams not found in the file with default values.
-  return training.create_hparams(**hparams.values())
-
-
 def integrate_exact_baseline_and_model(
     checkpoint_dir: str,
+    hparams: tf.contrib.training.HParams = None,
     random_seed: int = 0,
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     integrate_method: str = 'RK23',
     exact_filter_interval: float = None) -> xarray.Dataset:
   """Integrate the given PDE with standard and modeled finite differences."""
-  hparams = load_hparams(checkpoint_dir)
+
+  if hparams is None:
+    hparams = training.load_hparams(checkpoint_dir)
 
   logging.info('integrating %s with seed=%s', hparams.equation, random_seed)
   equation_exact, equation_coarse = equations.from_hparams(

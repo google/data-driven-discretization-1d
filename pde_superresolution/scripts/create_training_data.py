@@ -17,8 +17,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import ast
 import functools
+import json
 import os.path
 
 from absl import app
@@ -46,8 +46,8 @@ flags.DEFINE_enum(
     'equation_name', 'burgers', list(equations.CONSERVATIVE_EQUATION_TYPES),
     'Equation to integrate.', allow_override=True)
 flags.DEFINE_string(
-    'equation_hparams', '{"num_points": 400}',
-    'Parameters to pass to the equation constructor.')
+    'equation_kwargs', '{"num_points": 400}',
+    'Parameters to pass to the equation constructor.', allow_override=True)
 flags.DEFINE_integer(
     'num_tasks', 10,
     'Number of times to integrate each equation.')
@@ -86,9 +86,9 @@ FLAGS = flags.FLAGS
 def main(_):
   runner = beam.runners.DirectRunner()  # must create before flags are used
 
-  hparams = ast.literal_eval(FLAGS.equation_hparams)
+  equation_kwargs = json.loads(FLAGS.equation_kwargs)
 
-  def create_equation(seed, name=FLAGS.equation_name, kwargs=hparams):
+  def create_equation(seed, name=FLAGS.equation_name, kwargs=equation_kwargs):
     equation_type = equations.EQUATION_TYPES[name]
     return equation_type(random_seed=seed, **kwargs)
 
@@ -108,7 +108,7 @@ def main(_):
   expected_samples_per_task = int(round(FLAGS.time_max / FLAGS.time_delta))
   expected_total_samples = expected_samples_per_task * FLAGS.num_tasks
 
-  def save(list_of_datasets, path=FLAGS.output_path, attrs=hparams):
+  def save(list_of_datasets, path=FLAGS.output_path, attrs=equation_kwargs):
     assert len(list_of_datasets) == len(seeds), len(list_of_datasets)
     combined = xarray.concat(list_of_datasets, dim='time')
     num_samples = combined.sizes['time']
@@ -132,4 +132,5 @@ def main(_):
 
 
 if __name__ == '__main__':
+  flags.mark_flag_as_required('output_path')
   app.run(main)

@@ -17,7 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import ast
+import json
 
 from absl import app
 from absl import flags
@@ -36,7 +36,7 @@ flags.DEFINE_string(
 
 # equation parameters
 flags.DEFINE_string(
-    'equation_hparams', '{"num_points": 400}',
+    'equation_kwargs', '{"num_points": 400}',
     'Parameters to pass to the equation constructor.')
 flags.DEFINE_integer(
     'num_samples', 10,
@@ -69,9 +69,9 @@ FLAGS = flags.FLAGS
 def main(_):
   runner = beam.runners.DirectRunner()  # must create before flags are used
 
-  hparams = ast.literal_eval(FLAGS.equation_hparams)
+  equation_kwargs = json.loads(FLAGS.equation_kwargs)
 
-  def create_equation(seed, kwargs=hparams):
+  def create_equation(seed, kwargs=equation_kwargs):
     return equations.ConservativeBurgersEquation(random_seed=seed, **kwargs)
 
   def integrate_baseline(

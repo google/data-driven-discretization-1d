@@ -26,6 +26,7 @@ import apache_beam as beam
 import numpy as np
 from pde_superresolution import equations
 from pde_superresolution import integrate
+from pde_superresolution import training
 from pde_superresolution import xarray_beam
 
 
@@ -41,6 +42,10 @@ flags.DEFINE_string(
 flags.DEFINE_enum(
     'equation_name', 'burgers', list(equations.CONSERVATIVE_EQUATION_TYPES),
     'Equation to integrate.', allow_override=True)
+flags.DEFINE_string(
+    'equation_kwargs', '',
+    'If provided, use these parameters instead of those on the saved equation.',
+    allow_override=True)
 flags.DEFINE_string(
     'output_name', 'results.nc',
     'Name of the netCDF file in checkpoint_dir to which to save results.')
@@ -105,9 +110,15 @@ def main(_):
   else:
     exact_filter_interval = None
 
+  hparams = training.load_hparams(FLAGS.checkpoint_dir)
+
+  if FLAGS.equation_kwargs:
+    hparams.set_hparam('equation_kwargs', FLAGS.equation_kwargs)
+
   integrate_all = functools.partial(
       integrate.integrate_exact_baseline_and_model,
       FLAGS.checkpoint_dir,
+      hparams,
       times=np.arange(0, FLAGS.time_max + FLAGS.time_delta, FLAGS.time_delta),
       warmup=FLAGS.warmup,
       integrate_method=FLAGS.integrate_method,

@@ -39,7 +39,7 @@ class CreateBaselineDataTest(absltest.TestCase):
     with flagsaver.flagsaver(
         output_path=output_path,
         equation_name='burgers',
-        equation_hparams='{"num_points": 400}',
+        equation_kwargs='{"num_points": 400}',
         num_samples=2,
         accuracy_orders=[1, 3, 5],
         time_max=1.0,

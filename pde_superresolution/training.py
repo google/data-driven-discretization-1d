@@ -26,6 +26,8 @@ from absl import logging
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from google.protobuf import text_format  # pylint: disable=g-bad-import-order
+from tensorflow.contrib.training.python.training import hparam_pb2  # pylint: disable=g-bad-import-order
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
 from typing import Any, Dict, List, Tuple, Type, Union
@@ -611,3 +613,14 @@ def training_loop(snapshots: np.ndarray,
           save_summaries(train_metrics, train_writer, global_step=step)
 
   return metrics_to_dataframe(logged_metrics)
+
+
+def load_hparams(checkpoint_dir: str) -> tf.contrib.training.HParams:
+  """Load saved hyperparameters from a checkpoint."""
+  hparams_path = os.path.join(checkpoint_dir, 'hparams.pbtxt')
+  hparam_def = hparam_pb2.HParamDef()
+  with tf.gfile.GFile(hparams_path, 'r') as f:
+    text_format.Merge(f.read(), hparam_def)
+  hparams = tf.contrib.training.HParams(hparam_def)
+  # Set any new hparams not found in the file with default values.
+  return create_hparams(**hparams.values())

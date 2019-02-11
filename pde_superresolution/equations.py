@@ -157,19 +157,20 @@ class Equation(object):
 
 
 class RandomForcing(object):
-  """Deterministic random forcing for Burger's equation."""
+  """Deterministic random forcing, periodic in both space and time."""
 
   def __init__(self,
                grid: Grid,
                nparams: int = 20,
                seed: int = 0,
                amplitude: float = 1,
+               k_min: int = 1,
                k_max: int = 3):
     self.grid = grid
     rs = np.random.RandomState(seed)
     self.a = 0.5 * amplitude * rs.uniform(-1, 1, size=(nparams, 1))
     self.omega = rs.uniform(-0.4, 0.4, size=(nparams, 1))
-    k_values = np.arange(1, k_max + 1)
+    k_values = np.arange(k_min, k_max + 1)
     self.k = rs.choice(np.concatenate([-k_values, k_values]), size=(nparams, 1))
     self.phi = rs.uniform(0, 2 * np.pi, size=(nparams, 1))
 
@@ -203,11 +204,15 @@ class BurgersEquation(Equation):
                period: float = 2 * np.pi,
                random_seed: int = 0,
                eta: float = 0.04,
-               k_max: int = 3):
+               k_min: int = 1,
+               k_max: int = 3,
+              ):
     super(BurgersEquation, self).__init__(
         num_points, resample_factor, period, random_seed)
-    self.forcing = RandomForcing(self.grid, seed=random_seed, k_max=k_max)
+    self.forcing = RandomForcing(self.grid, seed=random_seed, k_min=k_min,
+                                 k_max=k_max)
     self.eta = eta
+    self.k_min = k_min
     self.k_max = k_max
 
   def initial_value(self) -> np.ndarray:
@@ -239,6 +244,7 @@ class BurgersEquation(Equation):
         period=self.grid.period,
         random_seed=self.random_seed,
         eta=self.eta,
+        k_min=self.k_min,
         k_max=self.k_max)
 
 
@@ -297,10 +303,14 @@ class KdVEquation(Equation):
                num_points: int,
                resample_factor: int = 1,
                period: float = 50,
-               random_seed: int = 0):
+               random_seed: int = 0,
+               k_min: int = 1,
+               k_max: int = 3,
+              ):
     super(KdVEquation, self).__init__(
         num_points, resample_factor, period, random_seed)
-    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
+    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed,
+                                 k_min=k_min, k_max=k_max)
 
   def initial_value(self) -> np.ndarray:
     return self.forcing(0)
@@ -358,10 +368,14 @@ class KSEquation(Equation):
                num_points: int,
                resample_factor: int = 1,
                period: float = 100,
-               random_seed: int = 0):
+               random_seed: int = 0,
+               k_min: int = 1,
+               k_max: int = 3,
+              ):
     super(KSEquation, self).__init__(
         num_points, resample_factor, period, random_seed)
-    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed)
+    self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed,
+                                 k_min=k_min, k_max=k_max)
 
   @property
   def time_step(self) -> float:

@@ -17,7 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import ast
+import json
 
 from absl import app
 from absl import flags
@@ -38,7 +38,7 @@ flags.DEFINE_enum(
     'equation_name', 'burgers', list(equations.CONSERVATIVE_EQUATION_TYPES),
     'Equation to integrate.')
 flags.DEFINE_string(
-    'equation_hparams', '{"num_points": 400}',
+    'equation_kwargs', '{"num_points": 400}',
     'Parameters to pass to the equation constructor.')
 flags.DEFINE_integer(
     'num_samples', 10,
@@ -71,7 +71,7 @@ FLAGS = flags.FLAGS
 def main(_):
   runner = beam.runners.DirectRunner()  # must create before flags are used
 
-  hparams = ast.literal_eval(FLAGS.equation_hparams)
+  equation_kwargs = json.loads(FLAGS.equation_kwargs)
   accuracy_orders = FLAGS.accuracy_orders
 
   if (equations.EQUATION_TYPES[FLAGS.equation_name].BASELINE
@@ -80,7 +80,7 @@ def main(_):
   else:
     exact_filter_interval = None
 
-  def create_equation(seed, name=FLAGS.equation_name, kwargs=hparams):
+  def create_equation(seed, name=FLAGS.equation_name, kwargs=equation_kwargs):
     equation_type = equations.CONSERVATIVE_EQUATION_TYPES[name]
     return equation_type(random_seed=seed, **kwargs)
 

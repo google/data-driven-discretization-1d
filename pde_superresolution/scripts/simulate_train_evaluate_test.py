@@ -42,7 +42,7 @@ class IntegrationTest(absltest.TestCase):
     with flagsaver.flagsaver(
         output_path=training_path,
         equation_name='burgers',
-        equation_hparams='{"num_points": 256}',
+        equation_kwargs='{"num_points": 256}',
         num_tasks=2,
         time_max=1.0,
         time_delta=0.1,
