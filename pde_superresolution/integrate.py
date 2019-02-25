@@ -91,10 +91,18 @@ class PolynomialDifferentiator(Differentiator):
           space_derivatives, batched_inputs, equation), axis=0)
       self.value = equation.finalize_time_derivative(self.t, time_derivative)
 
+      self._space_derivatives = {
+          k: tf.squeeze(space_derivatives[..., i], axis=0)
+          for i, k in enumerate(equation.DERIVATIVE_NAMES)
+      }
+
       self.sess = tf.Session()
 
   def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
     return self.sess.run(self.value, feed_dict={self.t: t, self.inputs: y})
+
+  def calculate_space_derivatives(self, y):
+    return self.sess.run(self._space_derivatives, feed_dict={self.inputs: y})
 
 
 class SpectralDifferentiator(Differentiator):
@@ -105,8 +113,10 @@ class SpectralDifferentiator(Differentiator):
 
   def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
     period = self.equation.grid.period
-    space_derivatives = {order: scipy.fftpack.diff(y, order, period)
-                         for order in self.equation.DERIVATIVE_ORDERS}
+    names_and_orders = zip(self.equation.DERIVATIVE_NAMES,
+                           self.equation.DERIVATIVE_ORDERS)
+    space_derivatives = {name: scipy.fftpack.diff(y, order, period)
+                         for name, order in names_and_orders}
     time_derivative = self.equation.equation_of_motion(y, space_derivatives)
     return self.equation.finalize_time_derivative(t, time_derivative)
 
@@ -114,13 +124,19 @@ class SpectralDifferentiator(Differentiator):
 class WENODifferentiator(Differentiator):
   """Calculate derivatives using a 5th order WENO method."""
 
-  def __init__(self, equation: equations.ConservativeBurgersEquation,
-               **kwargs: Any):
-    self.weno = weno.WENO(equation, **kwargs)
+  def __init__(self,
+               equation: equations.Equation,
+               non_weno_accuracy_order: int = 3):
     self.equation = equation
+    self.poly_diff = PolynomialDifferentiator(equation, non_weno_accuracy_order)
 
   def __call__(self, t: float, y: np.ndarray) -> np.ndarray:
-    time_derivative = self.weno.calculate_time_derivative(y)
+    space_derivatives = self.poly_diff.calculate_space_derivatives(y)
+    # replace u^- and u^+ with WENO reconstructions
+    assert 'u_minus' in space_derivatives and 'u_plus' in space_derivatives
+    space_derivatives['u_minus'] = np.roll(weno.reconstruct_left(y), 1)
+    space_derivatives['u_plus'] = np.roll(weno.reconstruct_right(y), 1)
+    time_derivative = self.equation.equation_of_motion(y, space_derivatives)
     return self.equation.finalize_time_derivative(t, time_derivative)
 
 
@@ -206,6 +222,8 @@ def exact_differentiator(
   Returns:
     Differentiator to use for "exact" integration.
   """
+  if type(equation.to_exact()) is not type(equation):
+    raise TypeError('an exact equation must be provided')
   if equation.BASELINE is equations.Baseline.POLYNOMIAL:
     differentiator = PolynomialDifferentiator(equation, accuracy_order=None)
   elif equation.BASELINE is equations.Baseline.SPECTRAL:
@@ -291,7 +309,7 @@ def integrate_baseline(
 
 
 def integrate_weno(
-    equation: equations.ConservativeBurgersEquation,
+    equation: equations.Equation,
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     integrate_method: str = 'RK23',
@@ -316,12 +334,12 @@ def integrate_exact_baseline_and_model(
     hparams = training.load_hparams(checkpoint_dir)
 
   logging.info('integrating %s with seed=%s', hparams.equation, random_seed)
-  equation_exact, equation_coarse = equations.from_hparams(
+  equation_fine, equation_coarse = equations.from_hparams(
       hparams, random_seed=random_seed)
 
   logging.info('solving the "exact" model at high resolution')
   ds_solution_exact = integrate_exact(
-      equation_exact, times, warmup, integrate_method=integrate_method,
+      equation_fine, times, warmup, integrate_method=integrate_method,
       filter_interval=exact_filter_interval)
   solution_exact = ds_solution_exact['y'].data
   num_evals_exact = ds_solution_exact['num_evals'].item()
@@ -351,7 +369,7 @@ def integrate_exact_baseline_and_model(
   }, coords={
       'time': warmup+times,
       'x_low': equation_coarse.grid.solution_x,
-      'x_high': equation_exact.grid.solution_x,
+      'x_high': equation_fine.grid.solution_x,
       'num_evals_exact': num_evals_exact,
       'num_evals_baseline': num_evals_baseline,
       'num_evals_model': num_evals_model,

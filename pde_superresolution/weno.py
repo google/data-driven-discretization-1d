@@ -12,162 +12,102 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+"""An implementation of 5th order upwind-biased WENO, "WENO5".
+
+Based on the implementation described in:
+[1] Tang, Lei. 2005. "Upwind and Central WENO Schemes." Applied Mathematics and
+    Computation 166 (2): 434-48.
+[2] Shu, Chi-Wang. 1998. "Essentially Non-Oscillatory and Weighted Essentially
+    Non-Oscillatory Schemes for Hyperbolic Conservation Laws." In Advanced
+    Numerical Approximation of Nonlinear Hyperbolic Equations: Lectures given
+    at the 2nd Session of the Centro Internazionale Matematico Estivo
+    (C.I.M.E.) Held in Cetraro, Italy, June 23-28, 1997, edited by Bernardo
+    Cockburn, Chi-Wang Shu, Claes Johnson, Eitan Tadmor, and Alfio Quarteroni,
+    325-432. Berlin, Heidelberg: Springer Berlin Heidelberg.
+    https://www3.nd.edu/~zxu2/acms60790S13/Shu-WENO-notes.pdf
+"""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import enum
 import numpy as np
 
-from pde_superresolution import equations  # pylint: disable=g-bad-import-order
-from pde_superresolution import polynomials  # pylint: disable=g-bad-import-order
+
+# These optimal weights result in a 5th order one-point upwinded coefficients
+# for smooth functions.
+OPTIMAL_SMOOTH_WEIGHTS = (0.1, 0.6, 0.3)
 
 
-# constants for k=2 and k=3
-_RECONSTRUCTION_COEFF = {
-    2: np.array([
-        [-1/2, 3/2, 0],
-        [0, 1/2, 1/2],
-    ]),
-    3: (1 / 6) * np.array([
-        [2, -7, 11, 0, 0],
-        [0, -1, 5, 2, 0],
-        [0, 0, 2, 5, -1]
-    ]),
-}
-_SMOOTHNESS_COEFF = {
-    2: np.array([[
-        [1, -1, 0],
-        [0, 1, -2],
-    ]]),
-    3: np.array([
-        np.sqrt(13/12)*np.array([
-            [1, -2, 1, 0, 0],
-            [0, 1, -2, 1, 0],
-            [0, 0, 1, -2, 1],
-        ]),
-        0.5*np.array([
-            [1, -4, 3, 0, 0],
-            [0, 1, 0, -1, 0],
-            [0, 0, 3, -4, 1],
-        ]),
-    ])
-}
-_WEIGHTS_D = {
-    2: np.array([[1/3, 2/3]]).T,
-    3: np.array([[0.1, 0.6, 0.3]]).T,
-}
-
-UX_4_POINT = polynomials.coefficients(
-    np.array([1.5, 0.5, -0.5, -1.5]),
-    polynomials.Method.FINITE_VOLUMES,
-    derivative_order=1)
+def calculate_smoothness_indicators(u):
+  """Calculate smoothness indicators for picking weights."""
+  # see Equation (7) in ref [1]
+  u_minus2 = np.roll(u, +2)
+  u_minus1 = np.roll(u, +1)
+  u_plus1 = np.roll(u, -1)
+  u_plus2 = np.roll(u, -2)
+  return np.stack([
+      1/4 * (u_minus2 - 4 * u_minus1 + 3 * u) ** 2 +
+      13/12 * (u_minus2 - 2 * u_minus1 + u) ** 2,
+      1/4 * (u_minus1 - u_plus1) ** 2 +
+      13/12 * (u_minus1 - 2 * u + u_plus1) ** 2,
+      1/4 * (3 * u - 4 * u_plus1 + u_plus2) ** 2 +
+      13/12 * (u - 2 * u_plus1 + u_plus2) ** 2,
+  ], axis=0)
 
 
-class FluxMethod(enum.Enum):
-  """Relationship between successive grids."""
-  GODUNOV = 1
-  LAX_FRIEDRICHS = 2
+def calculate_omega(
+    u,
+    optimal_linear_weights=OPTIMAL_SMOOTH_WEIGHTS,
+    epsilon=1e-6,
+    p=2,
+):
+  """Calculate linear weights for the three polynomial reconstructions."""
+  # see Equation (6) in ref [1]
+  indicator_jk = calculate_smoothness_indicators(u).T
+  # p=2 is used by ref. [2]
+  alpha_jk = np.array(optimal_linear_weights) / (epsilon + indicator_jk) ** p
+  omega_kj = (alpha_jk / alpha_jk.sum(axis=1, keepdims=True)).T
+  return omega_kj
 
 
-class WENO(object):
-  """Finite volume WENO implementation.
+def left_coefficients(u):
+  """Linear coefficients for WENO reconstruction from the left."""
+  # see Equation (5) from ref [1]
+  omega_kj = calculate_omega(u)
+  omega0, omega1, omega2 = omega_kj
+  return np.stack([
+      omega0 / 3,
+      - (7 * omega0 + omega1) / 6,
+      (11 * omega0 + 5 * omega1 + 2 * omega2) / 6,
+      (2 * omega1 + 5 * omega2) / 6,
+      - omega2 / 6,
+  ])
 
-  An implementation of 4th order finite volume WENO, following Chi-Wang Shu,
-  "Essentially Non-Oscillatory and Weighted Essentially Non-Oscillatory Schemes
-  for Hyperbolic Conservation Laws", NASA/CR-97-206253, Nov 1997,
-  available at https://www3.nd.edu/~zxu2/acms60790S13/Shu-WENO-notes.pdf
 
-  In their notation, this implementation uses k=3.
-  """
+def reconstruct_left(u):
+  """Reconstruct u at +1/2 cells with a left-biased stencil."""
+  coefficients = left_coefficients(u)
+  u_all = np.stack([np.roll(u, i) for i in [2, 1, 0, -1, -2]])
+  return np.einsum('kj,kj->j', coefficients, u_all)
 
-  def __init__(
-      self,
-      equation: equations.ConservativeBurgersEquation,
-      flux_method: FluxMethod = FluxMethod.GODUNOV,
-      k: int = 3):
-    """Constructor.
 
-    Args:
-      equation: conservative burgers equation to integrate.
-      flux_method: monotone flux method.
-      k: reconstruction order.
-    """
-    if not isinstance(equation, equations.ConservativeBurgersEquation):
-      raise TypeError('invalid equation: {}'.format(equation))
+def right_coefficients(u):
+  """Linear coefficients for WENO reconstruction from the right."""
+  # see Equation (9) from ref [1], but note that it has an error: optimal
+  # smoothing weights should be reversed, per step 2 of Procedure 2.2 in ref [2]
+  omega_kj = calculate_omega(u, OPTIMAL_SMOOTH_WEIGHTS[::-1])
+  omega2, omega1, omega0 = np.roll(omega_kj, -1, axis=-1)
+  return np.stack([
+      -omega2 / 6,
+      (5 * omega2 + 2 * omega1) / 6,
+      (2 * omega2 + 5 * omega1 + 11 * omega0) / 6,
+      -(omega1 + 7 * omega0) / 6,
+      omega0 / 3,
+  ])
 
-    self.equation = equation
-    self.flux_method = flux_method
-    self.eps = 1e-6
-    self.dx = equation.grid.solution_dx
-    self.k = k
 
-  def calculate_time_derivative(self, u: np.ndarray) -> np.ndarray:
-    """Returns the WENO approximation of the divergence of the flux."""
-    # reconstrution at +1/2 cells
-    p = _RECONSTRUCTION_COEFF[self.k]
-    s = _SMOOTHNESS_COEFF[self.k]
-    d = _WEIGHTS_D[self.k]
-    u_minus = self.reconstruction(np.roll(u, -1), p, s, d)
-    u_plus = self.reconstruction(u, p[::-1, ::-1], s, d[::-1])
-
-    if self.k == 2:
-      u_x = (np.roll(u, -1) - u) / self.dx
-    elif self.k == 3:
-      u_x = (np.roll(u, -2) * UX_4_POINT[0]
-             + np.roll(u, -1) * UX_4_POINT[1]
-             + u * UX_4_POINT[2]
-             + np.roll(u, 1) * UX_4_POINT[3]) / self.dx
-
-    if self.flux_method is FluxMethod.LAX_FRIEDRICHS:
-      # flux at +1/2 cells
-      f_minus = self.equation.flux(u_minus, u_x)
-      f_plus = self.equation.flux(u_plus, u_x)
-
-      # NOTE(shoyer): in principle, I think we could replace this by a local
-      # maximum, but I doubt that would make a difference for Burgers' equation
-      alpha = np.max(abs(self.equation.flux_derivative(u)))
-      flux = 0.5 * (f_minus + f_plus - alpha * (u_plus - u_minus))
-
-    elif self.flux_method is FluxMethod.GODUNOV:
-      w = np.linspace(0, 1, num=1001).reshape(-1, 1)
-      u_range = w * u_minus + (1 - w) * u_plus
-      f_range = self.equation.flux(u_range, u_x)
-      f_min = f_range.min(axis=0)
-      f_max = f_range.max(axis=0)
-      flux = np.where(u_minus <= u_plus, f_min, f_max)
-    else:
-      raise ValueError('invalid flux method')
-
-    # difference of flux at +1/2 and -1/2 cells
-    time_deriv = (flux - np.roll(flux, 1)) / self.dx
-    return time_deriv
-
-  def reconstruction(
-      self,
-      u: np.ndarray,
-      p: np.ndarray,
-      s: np.ndarray,
-      d: np.ndarray
-  ) -> np.ndarray:
-    """Reconstructs the flux from the point values f.
-
-    Args:
-      u: input values for the scalar field.
-      p: polynomial coefficients.
-      s: coefficients to use in calculating smoothness.
-      d: optimal convex combination coefficients for smooth functions (Eq.
-        (2.54) in the lecture notes).
-
-    Returns:
-      Reconstructed flux.
-    """
-    # defined at [+2.5, +1.5, +0.5, -0.5, -1.5] cells (for k=3)
-    ws = np.stack([np.roll(u, k) for k in range(-(self.k - 1), self.k)])
-    # polynomial reconstruction
-    ps = np.matmul(p, ws)
-    # smoothness indicators
-    beta_r = np.einsum('ijk,kl->jl', s, ws) ** 2
-    alphas = d / (beta_r + self.eps) ** 2
-    weights = alphas / alphas.sum(axis=0)
-    return np.sum(weights * ps, axis=0)
+def reconstruct_right(u):
+  """Reconstruct u at +1/2 cells with a right-biased stencil."""
+  coefficients = right_coefficients(u)
+  u_all = np.stack([np.roll(u, i) for i in [1, 0, -1, -2, -3]])
+  return np.einsum('kj,kj->j', coefficients, u_all)

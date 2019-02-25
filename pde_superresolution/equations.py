@@ -74,6 +74,7 @@ class Equation(object):
   CONSERVATIVE = ...  # type: bool
   GRID_OFFSET = ...  # type: polynomials.GridOffset
   BASELINE = ...  # type: Baseline
+  DERIVATIVE_NAMES =...  # type: Tuple[str, ...]
   DERIVATIVE_ORDERS = ...  # type: Tuple[int, ...]
 
   def __init__(self,
@@ -114,7 +115,7 @@ class Equation(object):
     raise NotImplementedError
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
     """Time derivatives of the state `y` for integration.
 
     ML models may have access to equation_of_motion() for training.
@@ -123,8 +124,7 @@ class Equation(object):
       y: float np.ndarray or tf.Tensor (with any number of dimensions) giving
         current function values.
       spatial_derivatives: dict of np.ndarray or Tensor with same dtype/shape
-        as `y` mapping from integer spatial derivative orders to derivative
-        values.
+        as `y` mapping from spatial derivatives by name to derivative values.
 
     Returns:
       ndarray or Tensor with same dtype/shape as `y` giving the partial
@@ -151,8 +151,24 @@ class Equation(object):
     del t  # unused
     return y_t
 
+  def to_fine(self) -> 'Equation':
+    """Return a copy of this equation on a fine resolution grid.
+
+    This equation will have exactly the same type and parameters, with the
+    exception of resample_factor.
+    """
+    raise NotImplementedError
+
   def to_exact(self) -> 'Equation':
-    """Convert into an exact equation."""
+    """Return the "exact" version of this equation, on the same grid.
+
+    This equation will have exactly the same parameters, except it may have a
+    different type.
+
+    This is used for "exact" numerical integration in integrate.py. It should
+    be a conservative equation for Burgers' and a non-conservative equation for
+    KdV and KS (we use it with spectral methods).
+    """
     raise NotImplementedError
 
 
@@ -196,6 +212,7 @@ class BurgersEquation(Equation):
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   BASELINE = Baseline.POLYNOMIAL
+  DERIVATIVE_NAMES = ('u_x', 'u_xx')
   DERIVATIVE_ORDERS = (1, 2)
 
   def __init__(self,
@@ -229,23 +246,30 @@ class BurgersEquation(Equation):
     return 1.300
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
-    y_x = spatial_derivatives[1]
-    y_xx = spatial_derivatives[2]
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
+    y_x = spatial_derivatives['u_x']
+    y_xx = spatial_derivatives['u_xx']
     y_t = self.eta * y_xx - y * y_x
     return y_t
 
   def finalize_time_derivative(self, t: float, y_t: tf.Tensor) -> tf.Tensor:
     return y_t + self.forcing(t)
 
-  def to_exact(self):
-    return ConservativeBurgersEquation(
-        self.grid.reference_num_points,
+  def _params(self):
+    return dict(
+        num_points=self.grid.reference_num_points,
         period=self.grid.period,
         random_seed=self.random_seed,
         eta=self.eta,
         k_min=self.k_min,
-        k_max=self.k_max)
+        k_max=self.k_max,
+    )
+
+  def to_fine(self):
+    return type(self)(**self._params())
+
+  def to_exact(self):
+    return ConservativeBurgersEquation(**self._params())
 
 
 def staggered_first_derivative(y: T, dx: float) -> T:
@@ -271,13 +295,14 @@ class ConservativeBurgersEquation(BurgersEquation):
 
   CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u', 'u_x')
   DERIVATIVE_ORDERS = (0, 1)
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
     del y  # unused
-    y = spatial_derivatives[0]
-    y_x = spatial_derivatives[1]
+    y = spatial_derivatives['u']
+    y_x = spatial_derivatives['u_x']
     flux = self.flux(y, y_x)
     y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
@@ -291,18 +316,51 @@ class ConservativeBurgersEquation(BurgersEquation):
     return -y
 
 
+def godunov_convective_flux(u_minus, u_plus):
+  """Calculate Godunov's flux for 0.5*u**2."""
+  u_minus_squared = u_minus ** 2
+  u_plus_squared = u_plus ** 2
+  return 0.5 * duckarray.where(
+      u_minus <= u_plus,
+      duckarray.minimum(u_minus_squared, u_plus_squared),
+      duckarray.maximum(u_minus_squared, u_plus_squared),
+  )
+
+
+class GodunovBurgersEquation(BurgersEquation):
+  """Conserative Burgers' equation using Godunov numerical flux."""
+
+  CONSERVATIVE = True
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u_minus', 'u_plus', 'u_x')
+  DERIVATIVE_ORDERS = (0, 0, 1)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
+    del y  # unused
+    y_minus = spatial_derivatives['u_minus']
+    y_plus = spatial_derivatives['u_plus']
+    y_x = spatial_derivatives['u_x']
+
+    convective_flux = godunov_convective_flux(y_minus, y_plus)
+    flux = self.eta * y_x - convective_flux
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
+    return y_t
+
+
 class KdVEquation(Equation):
   """Korteweg-de Vries (KdV) equation with random initial conditions."""
 
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   BASELINE = Baseline.SPECTRAL
+  DERIVATIVE_NAMES = ('u_x', 'u_xxx')
   DERIVATIVE_ORDERS = (1, 3)
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               period: float = 50,
+               period: float = 32,
                random_seed: int = 0,
                k_min: int = 1,
                k_max: int = 3,
@@ -311,6 +369,8 @@ class KdVEquation(Equation):
         num_points, resample_factor, period, random_seed)
     self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed,
                                  k_min=k_min, k_max=k_max)
+    self.k_min = k_min
+    self.k_max = k_max
 
   def initial_value(self) -> np.ndarray:
     return self.forcing(0)
@@ -326,17 +386,26 @@ class KdVEquation(Equation):
     return 0.594
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
-    y_x = spatial_derivatives[1]
-    y_xxx = spatial_derivatives[3]
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
+    y_x = spatial_derivatives['u_x']
+    y_xxx = spatial_derivatives['u_xxx']
     y_t = -6.0 * y * y_x - y_xxx
     return y_t
 
-  def to_exact(self):
-    return KdVEquation(
-        self.grid.reference_num_points,
+  def _params(self):
+    return dict(
+        num_points=self.grid.reference_num_points,
         period=self.grid.period,
-        random_seed=self.random_seed)
+        random_seed=self.random_seed,
+        k_min=self.k_min,
+        k_max=self.k_max,
+    )
+
+  def to_fine(self):
+    return type(self)(**self._params())
+
+  def to_exact(self):
+    return KdVEquation(**self._params())
 
 
 class ConservativeKdVEquation(KdVEquation):
@@ -344,14 +413,36 @@ class ConservativeKdVEquation(KdVEquation):
 
   CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u', 'u_xx')
   DERIVATIVE_ORDERS = (0, 2)
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
     del y  # unused
-    y = spatial_derivatives[0]
-    y_xx = spatial_derivatives[2]
+    y = spatial_derivatives['u']
+    y_xx = spatial_derivatives['u_xx']
     flux = -3.0 * y ** 2 - y_xx
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
+    return y_t
+
+
+class GodunovKdVEquation(KdVEquation):
+  """Conservative KdV using Godunov numerical flux."""
+
+  CONSERVATIVE = True
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u_minus', 'u_plus', 'u_xx')
+  DERIVATIVE_ORDERS = (0, 0, 2)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[Tuple[str, int], T]) -> T:
+    del y  # unused
+    y_minus = spatial_derivatives['u_minus']
+    y_plus = spatial_derivatives['u_plus']
+    y_xx = spatial_derivatives['u_xx']
+
+    convective_flux = 6 * godunov_convective_flux(y_minus, y_plus)
+    flux = -y_xx - convective_flux
     y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
@@ -362,12 +453,13 @@ class KSEquation(Equation):
   CONSERVATIVE = False
   GRID_OFFSET = polynomials.GridOffset.CENTERED
   BASELINE = Baseline.SPECTRAL
+  DERIVATIVE_NAMES = ('u_x', 'u_xx', 'u_xxxx')
   DERIVATIVE_ORDERS = (1, 2, 4)
 
   def __init__(self,
                num_points: int,
                resample_factor: int = 1,
-               period: float = 100,
+               period: float = 64,
                random_seed: int = 0,
                k_min: int = 1,
                k_max: int = 3,
@@ -376,6 +468,8 @@ class KSEquation(Equation):
         num_points, resample_factor, period, random_seed)
     self.forcing = RandomForcing(self.grid, nparams=10, seed=random_seed,
                                  k_min=k_min, k_max=k_max)
+    self.k_min = k_min
+    self.k_max = k_max
 
   @property
   def time_step(self) -> float:
@@ -391,34 +485,64 @@ class KSEquation(Equation):
     return self.forcing(0)
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
-    y_x = spatial_derivatives[1]
-    y_xx = spatial_derivatives[2]
-    y_xxxx = spatial_derivatives[4]
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
+    y_x = spatial_derivatives['u_x']
+    y_xx = spatial_derivatives['u_xx']
+    y_xxxx = spatial_derivatives['u_xxxx']
     y_t = -y*y_x - y_xxxx - y_xx
     return y_t
 
-  def to_exact(self):
-    return KSEquation(
-        self.grid.reference_num_points,
+  def _params(self):
+    return dict(
+        num_points=self.grid.reference_num_points,
         period=self.grid.period,
-        random_seed=self.random_seed)
+        random_seed=self.random_seed,
+        k_min=self.k_min,
+        k_max=self.k_max,
+    )
+
+  def to_fine(self):
+    return type(self)(**self._params())
+
+  def to_exact(self):
+    return KSEquation(**self._params())
 
 
 class ConservativeKSEquation(KSEquation):
-  """KS constrained to obey the continuity equation."""
+  """Conservative KS using Godunov numerical flux."""
 
   CONSERVATIVE = True
   GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u', 'u_x', 'u_xxx')
   DERIVATIVE_ORDERS = (0, 1, 3)
 
   def equation_of_motion(
-      self, y: T, spatial_derivatives: Mapping[int, T]) -> T:
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
     del y  # unused
-    y = spatial_derivatives[0]
-    y_x = spatial_derivatives[1]
-    y_xxx = spatial_derivatives[3]
+    y = spatial_derivatives['u']
+    y_x = spatial_derivatives['u_x']
+    y_xxx = spatial_derivatives['u_xxx']
     flux = -0.5*y**2 - y_xxx - y_x
+    y_t = staggered_first_derivative(flux, self.grid.solution_dx)
+    return y_t
+
+
+class GodunovKSEquation(KSEquation):
+  CONSERVATIVE = True
+  GRID_OFFSET = polynomials.GridOffset.STAGGERED
+  DERIVATIVE_NAMES = ('u_minus', 'u_plus', 'u_x', 'u_xxx')
+  DERIVATIVE_ORDERS = (0, 0, 1, 3)
+
+  def equation_of_motion(
+      self, y: T, spatial_derivatives: Mapping[str, T]) -> T:
+    del y  # unused
+    y_minus = spatial_derivatives['u_minus']
+    y_plus = spatial_derivatives['u_plus']
+    y_x = spatial_derivatives['u_x']
+    y_xxx = spatial_derivatives['u_xxx']
+
+    convective_flux = godunov_convective_flux(y_minus, y_plus)
+    flux = -y_xxx - y_x - convective_flux
     y_t = staggered_first_derivative(flux, self.grid.solution_dx)
     return y_t
 
@@ -435,6 +559,12 @@ CONSERVATIVE_EQUATION_TYPES = {
     'ks': ConservativeKSEquation,
 }
 
+FLUX_EQUATION_TYPES = {
+    'burgers': GodunovBurgersEquation,
+    'kdv': GodunovKdVEquation,
+    'ks': GodunovKSEquation,
+}
+
 
 def equation_type_from_hparams(
     hparams: tf.contrib.training.HParams) -> Type[Equation]:
@@ -447,7 +577,10 @@ def equation_type_from_hparams(
     Corresponding equation type.
   """
   if hparams.conservative:
-    types = CONSERVATIVE_EQUATION_TYPES
+    if hparams.numerical_flux:
+      types = FLUX_EQUATION_TYPES
+    else:
+      types = CONSERVATIVE_EQUATION_TYPES
   else:
     types = EQUATION_TYPES
   return types[hparams.equation]
@@ -464,8 +597,7 @@ def from_hparams(
 
   Returns:
     A tuple of two Equation objects, providing the equations being solved on
-    the fine (exact) and coarse (modeled) grids. The fine equation is always the
-    original, non-conservative version.
+    the fine (exact) and coarse (modeled) grids.
 
   Raises:
     ValueError: if hparams.resample_factor does not exactly divide
@@ -485,6 +617,6 @@ def from_hparams(
       resample_factor=hparams.resample_factor,
       random_seed=random_seed,
       **kwargs)
-  fine_equation = coarse_equation.to_exact()
+  fine_equation = coarse_equation.to_fine()
 
   return fine_equation, coarse_equation

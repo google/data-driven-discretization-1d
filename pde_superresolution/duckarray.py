@@ -73,6 +73,19 @@ def reshape(x: T, shape: Sequence[int]) -> T:
     return np.reshape(x, shape)
 
 
+def maximum(x: T, y: T) -> T:
+  return tf.maximum(x, y) if isinstance(x, tf.Tensor) else np.maximum(x, y)
+
+
+def minimum(x: T, y: T) -> T:
+  return tf.minimum(x, y) if isinstance(x, tf.Tensor) else np.minimum(x, y)
+
+
+def where(cond: T, x: T, y: T) -> T:
+  where_ = tf.where if isinstance(cond, tf.Tensor) else np.where
+  return where_(cond, x, y)
+
+
 def rfft(x: T) -> T:
   return tf.spectral.rfft(x) if isinstance(x, tf.Tensor) else np.fft.rfft(x)
 

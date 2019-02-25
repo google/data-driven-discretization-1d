@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Run a beam pipeline to generate training data."""
+"""Run a beam pipeline to run the WENO5 model."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -25,7 +25,6 @@ import apache_beam as beam
 import numpy as np
 from pde_superresolution import equations
 from pde_superresolution import integrate
-from pde_superresolution import weno
 from pde_superresolution import xarray_beam
 
 
@@ -35,6 +34,9 @@ flags.DEFINE_string(
     'Full path to which to save the resulting netCDF file.')
 
 # equation parameters
+flags.DEFINE_enum(
+    'equation_name', 'burgers', list(equations.FLUX_EQUATION_TYPES),
+    'Equation to integrate.')
 flags.DEFINE_string(
     'equation_kwargs', '{"num_points": 400}',
     'Parameters to pass to the equation constructor.')
@@ -52,12 +54,6 @@ flags.DEFINE_float(
 flags.DEFINE_float(
     'warmup', 0,
     'Amount of time to integrate before using the neural network.')
-flags.DEFINE_enum_class(
-    'flux_method', 'GODUNOV', weno.FluxMethod,
-    'Monotone flux method.')
-flags.DEFINE_integer(
-    'weno_k', 3,
-    'Number coefficients used for WENO reconstructions.')
 flags.DEFINE_string(
     'integrate_method', 'RK23',
     'Method to use for integration with scipy.integrate.solve_ivp.')
@@ -71,18 +67,16 @@ def main(_):
 
   equation_kwargs = json.loads(FLAGS.equation_kwargs)
 
-  def create_equation(seed, kwargs=equation_kwargs):
-    return equations.ConservativeBurgersEquation(random_seed=seed, **kwargs)
+  def create_equation(seed, name=FLAGS.equation_name, kwargs=equation_kwargs):
+    equation_type = equations.FLUX_EQUATION_TYPES[name]
+    return equation_type(random_seed=seed, **kwargs)
 
   def integrate_baseline(
       equation,
       times=np.arange(0, FLAGS.time_max, FLAGS.time_delta),
       warmup=FLAGS.warmup,
-      flux_method=FLAGS.flux_method,
-      k=FLAGS.weno_k,
       integrate_method=FLAGS.integrate_method):
-    return integrate.integrate_weno(
-        equation, times, warmup, integrate_method, flux_method=flux_method, k=k)
+    return integrate.integrate_weno(equation, times, warmup, integrate_method)
 
   def create_equation_and_integrate(seed):
     equation = create_equation(seed)

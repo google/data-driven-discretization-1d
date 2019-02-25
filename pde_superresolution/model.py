@@ -122,8 +122,9 @@ def apply_space_derivatives(
     Float32 Tensor with diensions [batch, x] giving the time derivatives for
     the given inputs and derivative model.
   """
-  derivatives_dict = {d: derivatives[..., i]
-                      for i, d in enumerate(equation.DERIVATIVE_ORDERS)}
+  derivatives_dict = {
+      k: derivatives[..., i] for i, k in enumerate(equation.DERIVATIVE_NAMES)
+  }
   return equation.equation_of_motion(inputs, derivatives_dict)
 
 

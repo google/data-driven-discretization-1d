@@ -60,6 +60,9 @@ class IntegrateTest(parameterized.TestCase):
       dict(equation='burgers', conservative=True),
       dict(equation='kdv', conservative=True),
       dict(equation='ks', conservative=True),
+      dict(equation='burgers', conservative=True, numerical_flux=True),
+      dict(equation='kdv', conservative=True, numerical_flux=True),
+      dict(equation='ks', conservative=True, numerical_flux=True),
       dict(equation='burgers', warmup=1),
       dict(equation='burgers', warmup=1, conservative=True),
       dict(equation='kdv', warmup=1, conservative=True),
@@ -159,19 +162,18 @@ class IntegrateTest(parameterized.TestCase):
         y_mean, xarray.zeros_like(y_mean), atol=1e-3)
 
   @parameterized.parameters(
-      dict(flux_method=weno.FluxMethod.LAX_FRIEDRICHS),
-      dict(flux_method=weno.FluxMethod.GODUNOV),
-      dict(flux_method=weno.FluxMethod.GODUNOV, k=2, tol=2e-3),
+      dict(equation=equations.GodunovBurgersEquation(200)),
+      dict(equation=equations.GodunovKdVEquation(200), tol=5e-3),
+      dict(equation=equations.GodunovKSEquation(200)),
   )
-  def test_integrate_baseline_and_weno_consistency(self, tol=1e-3, **kwargs):
-    equation = equations.ConservativeBurgersEquation(200)
-
-    results_baseline = integrate.integrate_baseline(
-        equation, times=np.linspace(0, 1, num=11))
-    results_weno = integrate.integrate_weno(
-        equation, times=np.linspace(0, 1, num=11), **kwargs)
+  def test_integrate_baseline_and_weno_consistency(self, equation, tol=1e-3):
+    times = np.linspace(0, 1, num=11)
+    results_baseline = integrate.integrate_baseline(equation, times=times)
+    results_weno = integrate.integrate_weno(equation, times=times)
     xarray.testing.assert_allclose(
-        results_baseline, results_weno, rtol=tol, atol=tol)
+        results_baseline.drop('num_evals'), results_weno.drop('num_evals'),
+        rtol=tol, atol=tol)
+
 
 if __name__ == '__main__':
   absltest.main()

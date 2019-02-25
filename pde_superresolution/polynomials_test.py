@@ -50,7 +50,7 @@ class PolynomialsTest(parameterized.TestCase):
         np.array(grid), FINITE_DIFF, derivative_order)
     np.testing.assert_allclose(result, expected)
 
-  # based in part on the WENO tutorial
+  # based in part on standard WENO coefficients
   @parameterized.parameters(
       dict(grid=[-0.5, 0.5], derivative_order=0, expected=[1/2, 1/2]),
       dict(grid=[-1, 1], derivative_order=0, expected=[1/2, 1/2]),
@@ -59,6 +59,8 @@ class PolynomialsTest(parameterized.TestCase):
            expected=[1/3, 5/6, -1/6]),
       dict(grid=[-0.25, 0.25, 0.75], derivative_order=0,
            expected=[1/3, 5/6, -1/6]),
+      dict(grid=[2.5, 1.5, 0.5, -0.5, -1.5], derivative_order=0,
+           expected=[2/60, -13/60, 47/60, 27/60, -3/60]),
       dict(grid=[-0.5, 0.5], derivative_order=1, expected=[-1, 1]),
       dict(grid=[-1, 1], derivative_order=1, expected=[-1/2, 1/2]),
       dict(grid=[0.5, 1.5, 2.5], derivative_order=1, expected=[-2, 3, -1]),

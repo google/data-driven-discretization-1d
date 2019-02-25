@@ -44,6 +44,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
     equation: name of the equation being solved.
     conservative: boolean indicating whether to use the continuity preserving
       variant of this equation or not.
+    numerical_flux: whether to use the Gudonov numerical flux formulation of the
+      equation.
     resample_factor: integer factor by which to upscale from low to high
       resolution. Must evenly divide the high resolution grid.
     equation_kwargs: JSON encoded string with equation specific keyword
@@ -118,6 +120,7 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       # dataset parameters
       equation=equation,
       conservative=True,
+      numerical_flux=False,
       equation_kwargs='{}',
       resample_factor=4,
       # neural network parameters
