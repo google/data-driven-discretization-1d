@@ -12,19 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Neural network models for finite difference coefficients.
-
-Our models currently take the form of "pseudo-linear" local image filters, where
-the linear coeffcients are provided by the output of a convolutional neural
-network. This allows us to naturally impose constraints on the filters, such
-as requiring that they sum to zero.
-
-We currently can learn two types of down-sampling models:
-- subsample() where we keep every k-th output from the high-resolution
-  simulation.
-- resample_mean() where take a block-average of every k elements from the high-
-  resolution simulation.
-"""
+"""Neural network models for PDEs."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -529,6 +517,34 @@ def apply_coefficients(coefficients: tf.Tensor, inputs: tf.Tensor) -> tf.Tensor:
   return tf.einsum('bxdi,bxi->bxd', coefficients, patches)
 
 
+def _multilayer_conv1d(inputs, hparams, num_targets, reuse=tf.AUTO_REUSE):
+  """Apply multiple conv1d layers with input normalization."""
+  _, equation = equations.from_hparams(hparams)
+  assert_consistent_solution(equation, inputs)
+
+  net = inputs[:, :, tf.newaxis]
+  net /= equation.standard_deviation
+
+  activation = _NONLINEARITIES[hparams.nonlinearity]
+  for _ in range(hparams.num_layers - 1):
+    net = layers.conv1d_periodic_layer(net, filters=hparams.filter_size,
+                                       kernel_size=hparams.kernel_size,
+                                       activation=activation, center=True)
+  if hparams.num_layers == 0:
+    raise NotImplementedError('not implemented yet')
+  net = layers.conv1d_periodic_layer(
+      net, filters=num_targets, kernel_size=hparams.kernel_size,
+      activation=None, center=True)
+  return net
+
+
+def predict_space_derivatives_directly(inputs, hparams, reuse=tf.AUTO_REUSE):
+  """Predict finite difference coefficients directly from a neural net."""
+  _, equation = equations.from_hparams(hparams)
+  num_targets = len(equation.DERIVATIVE_ORDERS)
+  return _multilayer_conv1d(inputs, hparams, num_targets, reuse=reuse)
+
+
 def predict_space_derivatives(
     inputs: tf.Tensor,
     hparams: tf.contrib.training.HParams,
@@ -543,8 +559,29 @@ def predict_space_derivatives(
   Returns:
     Float32 Tensor with dimensions [batch, x, derivative].
   """
-  coefficients = predict_coefficients(inputs, hparams, reuse=reuse)
-  return apply_coefficients(coefficients, inputs)
+  if hparams.model_target == 'coefficients':
+    coefficients = predict_coefficients(inputs, hparams, reuse=reuse)
+    return apply_coefficients(coefficients, inputs)
+  elif hparams.model_target == 'space_derivatives':
+    return predict_space_derivatives_directly(inputs, hparams, reuse=reuse)
+  else:
+    raise NotImplementedError(
+        'unrecognized model_target: {}'.format(hparams.model_target))
+
+
+def predict_time_derivative_directly(inputs, hparams, reuse=tf.AUTO_REUSE):
+  """Predict time derivatives directly, without using the equation of motion."""
+  output = _multilayer_conv1d(inputs, hparams, num_targets=1, reuse=reuse)
+  return tf.squeeze(output, axis=-1)
+
+
+def predict_flux_directly(inputs, hparams, reuse=tf.AUTO_REUSE):
+  """Predict flux directly, without using the equation of motion."""
+  _, equation = equations.from_hparams(hparams)
+  dx = equation.grid.solution_dx
+  output = _multilayer_conv1d(inputs, hparams, num_targets=1, reuse=reuse)
+  flux = tf.squeeze(output, axis=-1)
+  return equations.staggered_first_derivative(flux, dx)
 
 
 def predict_time_derivative(
@@ -561,10 +598,15 @@ def predict_time_derivative(
   Returns:
     Float32 Tensor with dimensions [batch, x] with inferred time derivatives.
   """
-  space_derivatives = predict_space_derivatives(
-      inputs, hparams, reuse=reuse)
-  _, equation = equations.from_hparams(hparams)
-  return apply_space_derivatives(space_derivatives, inputs, equation)
+  if hparams.model_target == 'time_derivative':
+    return predict_time_derivative_directly(inputs, hparams, reuse=reuse)
+  elif hparams.model_target == 'flux':
+    return predict_flux_directly(inputs, hparams, reuse=reuse)
+  else:
+    space_derivatives = predict_space_derivatives(
+        inputs, hparams, reuse=reuse)
+    _, equation = equations.from_hparams(hparams)
+    return apply_space_derivatives(space_derivatives, inputs, equation)
 
 
 def predict_time_evolution(inputs: tf.Tensor,
@@ -599,11 +641,21 @@ def predict_result(inputs: tf.Tensor,
   Returns:
     Float32 Tensor with dimensions [batch, x] with inferred time derivatives.
   """
-  space_derivatives = predict_space_derivatives(inputs, hparams)
-
-  _, equation = equations.from_hparams(hparams)
-  time_derivative = apply_space_derivatives(
-      space_derivatives, inputs, equation)
+  if hparams.model_target in {'flux', 'time_derivative'}:
+    # use dummy values (all zeros) for space derivatives
+    if hparams.space_derivatives_weight:
+      raise ValueError('space derivatives are not predicted by model {}'
+                       .format(hparams.model_target))
+    _, equation = equations.from_hparams(hparams)
+    num_derivatives = len(equation.DERIVATIVE_ORDERS)
+    space_derivatives = tf.zeros(
+        tf.concat([tf.shape(inputs), [num_derivatives]], axis=0))
+    time_derivative = predict_time_derivative(inputs, hparams)
+  else:
+    space_derivatives = predict_space_derivatives(inputs, hparams)
+    _, equation = equations.from_hparams(hparams)
+    time_derivative = apply_space_derivatives(
+        space_derivatives, inputs, equation)
 
   if hparams.num_time_steps:
     integrated_solution = predict_time_evolution(inputs, hparams)

@@ -52,6 +52,9 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       arguments, excluding resample_factor and random_seed.
 
   Neural network parameters:
+    model_target: string indicating what the neural network is asked to directly
+      output, any of 'coefficients', 'space_derivatives', 'flux' or
+      'time_derivative'.
     num_layers: integer number of conv1d layers to use for coefficient
       prediction.
     filter_size: inetger filter size for conv1d layers.
@@ -124,6 +127,7 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       equation_kwargs='{}',
       resample_factor=4,
       # neural network parameters
+      model_target='coefficients',
       num_layers=3,
       filter_size=32,
       kernel_size=5,
