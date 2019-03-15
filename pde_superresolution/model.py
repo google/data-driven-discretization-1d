@@ -367,7 +367,7 @@ def make_dataset(snapshots: np.ndarray,
 
   dataset = tf.data.Dataset.from_tensor_slices(snapshots[indexer])
   dataset = dataset.map(lambda x: _stack_all_rolls(x, hparams.resample_factor))
-  dataset = dataset.apply(tf.contrib.data.unbatch())
+  dataset = dataset.apply(tf.data.experimental.unbatch())
 
   if repeat:
     dataset = dataset.apply(
