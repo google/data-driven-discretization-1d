@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # pylint: disable=line-too-long
-"""Run a beam pipeline to add netCDF files with survival results."""
+"""Run a beam pipeline to add netCDF files with mean absolute error."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -33,15 +33,15 @@ flags.DEFINE_string(
     'exact_results_file', None,
     'Optional file providing alternative "exact" simulation results.')
 flags.DEFINE_float(
-    'quantile', 0.8,
-    'Quantile to use for "good enough".')
+    'time_max', 25,
+    'Maximum time to consider.')
 
 
 FLAGS = flags.FLAGS
 
 
-def create_survival_netcdf(simulation_path, quantile=0.8, exact_path=None):
-  """Create a new netCDF file with survival analysis results."""
+def create_mae_netcdf(simulation_path, time_max=25, exact_path=None):
+  """Create a new netCDF file with mean absolute error."""
 
   if '/results.nc' not in simulation_path:
     # no simulation results
@@ -58,13 +58,15 @@ def create_survival_netcdf(simulation_path, quantile=0.8, exact_path=None):
                        .rename({'x': 'x_high'})
                        .reindex_like(ds, method='nearest'))
 
-  # do analysis
-  survival = analysis.mostly_good_survival(ds, quantile)
+  # do the analysis
+  ds = analysis.unify_x_coords(ds)
+  ds = ds.sel(time=slice(None, time_max))
+  mae = abs(ds.drop('y_exact') - ds.y_exact).mean(['x', 'time'], skipna=False)
 
   # save results
-  survival_path = simulation_path.replace('/results.nc', '/survival.nc')
-  with tf.gfile.GFile(survival_path, 'wb') as f:
-    f.write(survival.to_netcdf())
+  mae_path = simulation_path.replace('/results.nc', '/mae.nc')
+  with tf.gfile.GFile(mae_path, 'wb') as f:
+    f.write(mae.to_netcdf())
 
 
 def main(_):
@@ -73,7 +75,7 @@ def main(_):
   pipeline = (
       beam.Create(tf.gfile.Glob(FLAGS.file_pattern))
       | beam.Reshuffle()
-      | beam.Map(create_survival_netcdf, quantile=FLAGS.quantile,
+      | beam.Map(create_mae_netcdf, time_max=FLAGS.time_max,
                  exact_path=FLAGS.exact_results_file)
   )
   runner.run(pipeline)

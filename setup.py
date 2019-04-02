@@ -18,6 +18,7 @@ import setuptools
 
 INSTALL_REQUIRES = [
     'absl-py',
+    'apache-beam',
     'h5py',
     'numpy',
     'pandas',

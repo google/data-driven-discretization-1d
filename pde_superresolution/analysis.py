@@ -28,21 +28,26 @@ from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 XarrayObject = Union[xarray.Dataset, xarray.DataArray]  # pylint: disable=invalid-name
 
 
+def resample_mean(ds, dim, factor):
+  """Resample an xarray object along a single dimension."""
+  return xarray.apply_ufunc(
+      duckarray.resample_mean, ds,
+      input_core_dims=[[dim]], output_core_dims=[['dim_new']],
+      kwargs=dict(factor=factor)).rename({'dim_new': dim})
+
+
 def unify_x_coords(ds: xarray.Dataset) -> xarray.Dataset:
   """Resample data variables in an xarray.Dataset to only use low resolution."""
   factor = ds.sizes['x_high'] // ds.sizes['x_low']
 
-  high_vars = [k for k, v in ds.items() if 'x_high' in v.dims] + ['x_high']
-  ds_low = ds.drop(high_vars)
+  high_vars = [k for k, v in ds.variables.items() if 'x_high' in v.dims]
+  ds_low = ds.drop(high_vars).rename({'x_low': 'x'})
 
-  low_vars = [k for k, v in ds.items() if 'x_low' in v.dims] + ['x_low']
-  ds_high = ds.drop(low_vars)
-  ds_high_resampled = xarray.apply_ufunc(
-      duckarray.resample_mean, ds_high,
-      input_core_dims=[['x_high']], output_core_dims=[['x_low']],
-      kwargs=dict(factor=factor))
+  low_vars = [k for k, v in ds.variables.items() if 'x_low' in v.dims]
+  ds_high = ds.drop(low_vars).rename({'x_high': 'x'})
+  ds_high_resampled = resample_mean(ds_high, 'x', factor)
 
-  unified = ds_low.merge(ds_high_resampled).rename({'x_low': 'x'})
+  unified = ds_low.merge(ds_high_resampled)
   return xarray.Dataset(
       collections.OrderedDict((k, unified[k]) for k in sorted(unified)))
 

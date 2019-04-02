@@ -23,5 +23,4 @@ from pde_superresolution import polynomials
 from pde_superresolution import training
 from pde_superresolution import utils
 from pde_superresolution import weno
-# xarray_beam is not imported by default, to ensure beam remains an optional
-# dependency
+from pde_superresolution import xarray_beam
