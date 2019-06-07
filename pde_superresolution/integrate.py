@@ -224,10 +224,12 @@ def exact_differentiator(
   """
   if type(equation.to_exact()) is not type(equation):
     raise TypeError('an exact equation must be provided')
-  if equation.BASELINE is equations.Baseline.POLYNOMIAL:
+  if equation.EXACT_METHOD is equations.ExactMethod.POLYNOMIAL:
     differentiator = PolynomialDifferentiator(equation, accuracy_order=None)
-  elif equation.BASELINE is equations.Baseline.SPECTRAL:
+  elif equation.EXACT_METHOD is equations.ExactMethod.SPECTRAL:
     differentiator = SpectralDifferentiator(equation)
+  elif equation.EXACT_METHOD is equations.ExactMethod.WENO:
+    differentiator = WENODifferentiator(equation)
   else:
     raise TypeError('unexpected equation: {}'.format(equation))
   return differentiator
@@ -288,8 +290,7 @@ def integrate_exact(
   differentiator = exact_differentiator(equation)
   return integrate(equation, differentiator, times, warmup,
                    integrate_method=integrate_method,
-                   filter_interval=filter_interval,
-                   filter_all_times=True)
+                   filter_interval=filter_interval)
 
 
 def integrate_baseline(
@@ -304,8 +305,7 @@ def integrate_baseline(
       equation, accuracy_order=accuracy_order)
   return integrate(equation, differentiator, times, warmup,
                    integrate_method=integrate_method,
-                   filter_interval=exact_filter_interval,
-                   filter_all_times=False)
+                   filter_interval=exact_filter_interval)
 
 
 def integrate_weno(
@@ -313,11 +313,30 @@ def integrate_weno(
     times: np.ndarray = _DEFAULT_TIMES,
     warmup: float = 0,
     integrate_method: str = 'RK23',
+    exact_filter_interval: float = None,
     **kwargs: Any) -> xarray.Dataset:
   """Integrate a baseline finite difference model."""
+  if type(equation) not in equations.FLUX_EQUATION_TYPES.values():
+    raise ValueError('invalid equation: {}'.format(equation))
   differentiator = WENODifferentiator(equation, **kwargs)
   return integrate(equation, differentiator, times, warmup,
-                   integrate_method=integrate_method)
+                   integrate_method=integrate_method,
+                   filter_interval=exact_filter_interval)
+
+
+def integrate_spectral(
+    equation: equations.Equation,
+    times: np.ndarray = _DEFAULT_TIMES,
+    warmup: float = 0,
+    integrate_method: str = 'RK23',
+    exact_filter_interval: float = None) -> xarray.Dataset:
+  """Integrate a baseline finite difference model."""
+  if type(equation) not in equations.EQUATION_TYPES.values():
+    raise ValueError('invalid equation: {}'.format(equation))
+  differentiator = SpectralDifferentiator(equation)
+  return integrate(equation, differentiator, times, warmup,
+                   integrate_method=integrate_method,
+                   filter_interval=exact_filter_interval)
 
 
 def integrate_exact_baseline_and_model(
@@ -374,4 +393,35 @@ def integrate_exact_baseline_and_model(
       'num_evals_baseline': num_evals_baseline,
       'num_evals_model': num_evals_model,
   })
+  return results
+
+
+def integrate_model_from_warm_start(
+    checkpoint_dir: str,
+    y0: np.ndarray,
+    hparams: tf.contrib.training.HParams = None,
+    random_seed: int = 0,
+    times: np.ndarray = _DEFAULT_TIMES,
+    warmup: float = 0,
+    integrate_method: str = 'RK23') -> xarray.Dataset:
+  """Integrate the given PDE with standard and modeled finite differences."""
+
+  if hparams is None:
+    hparams = training.load_hparams(checkpoint_dir)
+
+  logging.info('integrating %s with seed=%s', hparams.equation, random_seed)
+  _, equation_coarse = equations.from_hparams(hparams, random_seed=random_seed)
+
+  logging.info('solving neural network model at low resolution')
+  checkpoint_path = training.checkpoint_dir_to_path(checkpoint_dir)
+  differentiator = SavedModelDifferentiator(
+      checkpoint_path, equation_coarse, hparams)
+  solution_model, num_evals_model = odeint(
+      y0, differentiator, warmup+times, method=integrate_method)
+
+  results = xarray.Dataset(
+      data_vars={'y': (('time', 'x'), solution_model)},
+      coords={'time': warmup+times,
+              'x': equation_coarse.grid.solution_x,
+              'num_evals': num_evals_model})
   return results

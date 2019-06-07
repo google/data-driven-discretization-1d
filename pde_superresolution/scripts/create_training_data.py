@@ -38,8 +38,9 @@ import xarray
 
 # files
 flags.DEFINE_string(
-    'output_path', None,
-    'Full path to which to save the resulting HDF5 file.')
+    'output_path', '',
+    'Full path to which to save the resulting HDF5 file.',
+    allow_override=True)
 
 # equation parameters
 flags.DEFINE_enum(
@@ -50,12 +51,14 @@ flags.DEFINE_string(
     'Parameters to pass to the equation constructor.', allow_override=True)
 flags.DEFINE_integer(
     'num_tasks', 10,
-    'Number of times to integrate each equation.')
+    'Number of times to integrate each equation.',
+    allow_override=True)
 flags.DEFINE_integer(
     'seed_offset', 1000000,
     'Integer seed offset for random number generator. This should be larger '
     'than the largest possible number of evaluation seeds, but smaller '
-    'than 2^32 (the size of NumPy\'s random number seed).')
+    'than 2^32 (the size of NumPy\'s random number seed).',
+    allow_override=True)
 
 # integrate parameters
 flags.DEFINE_float(
@@ -83,8 +86,10 @@ flags.DEFINE_float(
 FLAGS = flags.FLAGS
 
 
-def main(_):
-  runner = beam.runners.DirectRunner()  # must create before flags are used
+def main(_, runner=None):
+  if runner is None:
+    # must create before flags are used
+    runner = beam.runners.DirectRunner()
 
   equation_kwargs = json.loads(FLAGS.equation_kwargs)
 
@@ -92,8 +97,8 @@ def main(_):
     equation_type = equations.EQUATION_TYPES[name]
     return equation_type(random_seed=seed, **kwargs)
 
-  if (equations.EQUATION_TYPES[FLAGS.equation_name].BASELINE
-      is equations.Baseline.SPECTRAL and FLAGS.exact_filter_interval):
+  if (equations.EQUATION_TYPES[FLAGS.equation_name].EXACT_METHOD
+      is equations.ExactMethod.SPECTRAL and FLAGS.exact_filter_interval):
     filter_interval = FLAGS.exact_filter_interval
   else:
     filter_interval = None
@@ -132,5 +137,4 @@ def main(_):
 
 
 if __name__ == '__main__':
-  flags.mark_flag_as_required('output_path')
   app.run(main)

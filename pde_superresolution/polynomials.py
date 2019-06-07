@@ -167,6 +167,34 @@ def coefficients(
   return np.linalg.solve(A, b)
 
 
+def zero_padded_coefficients(
+    grid: np.ndarray,
+    method: Method,
+    derivative_order: int,
+    padding: Tuple[int, int]) -> np.ndarray:
+  """Calculate finite difference coefficients, but padded by zeros.
+
+  These coefficients always hold on the given grid, but the result is guaranteed
+  to have values on the left and right sides with indicated number of zeros.
+
+  Args:
+    grid: grid on which to calculate finite difference coefficients, which will
+      be trimmed based on padding.
+    method: discretization method.
+    derivative_order: integer derivative order to approximate.
+    padding: number of zeros to pad on the left and right sides of the result.
+
+  Returns:
+    NumPy array giving finite difference coefficients on the grid.
+  """
+  # note: need the "or" to avoid slicing with 0 as a right bound, because 0
+  # is always interpretted as an offset from the start.
+  pad_left, pad_right = padding
+  trimmed_grid = grid[pad_left : (-pad_right or None)]
+  trimmed_coefficients = coefficients(trimmed_grid, method, derivative_order)
+  return np.pad(trimmed_coefficients, padding, mode='constant')
+
+
 class PolynomialAccuracyLayer(object):
   """Layer to enforce polynomial accuracy for finite difference coefficients.
 
@@ -184,6 +212,7 @@ class PolynomialAccuracyLayer(object):
                derivative_order: int,
                accuracy_order: int = 2,
                bias: np.ndarray = None,
+               bias_zero_padding: Tuple[int, int] = (0, 0),
                out_scale: float = 1.0):
     """Constructor.
 
@@ -196,13 +225,18 @@ class PolynomialAccuracyLayer(object):
         mapped. Must satisfy polynomial accuracy to the requested order. By
         default, we calculate the standard finite difference coefficients for
         the given grid.
+      bias_zero_padding: if a value for bias is not provided, ensure that the
+        computed bias has the indicated number of zeros padded on the left and
+        right sides. This is useful for initializing bias with upwinded
+        coefficients.
       out_scale: desired multiplicative scaling on the outputs, relative to the
         bias.
     """
     A, b = constraints(grid, method, derivative_order, accuracy_order)  # pylint: disable=invalid-name
 
     if bias is None:
-      bias = coefficients(grid, method, derivative_order)
+      bias = zero_padded_coefficients(
+          grid, method, derivative_order, bias_zero_padding)
 
     norm = np.linalg.norm(np.dot(A, bias) - b)
     if norm > 1e-8:

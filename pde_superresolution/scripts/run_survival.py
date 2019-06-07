@@ -67,8 +67,10 @@ def create_survival_netcdf(simulation_path, quantile=0.8, exact_path=None):
     f.write(survival.to_netcdf())
 
 
-def main(_):
-  runner = beam.runners.DirectRunner()  # must create before flags are used
+def main(_, runner=None):
+  if runner is None:
+    # must create before flags are used
+    runner = beam.runners.DirectRunner()
 
   pipeline = (
       beam.Create(tf.gfile.Glob(FLAGS.file_pattern))

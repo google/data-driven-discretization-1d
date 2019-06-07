@@ -67,6 +67,7 @@ class TrainingTest(parameterized.TestCase):
       dict(equation='burgers', model_target='space_derivatives'),
       dict(equation='burgers', model_target='flux'),
       dict(equation='burgers', model_target='time_derivative'),
+      dict(equation='burgers', error_max=10.0),
       *extra_testcases)
   def test_training_loop(self, **hparam_values):
     with tf.Graph().as_default():

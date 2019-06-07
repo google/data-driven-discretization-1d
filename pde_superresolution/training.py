@@ -91,8 +91,8 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
   Loss parameters:
     ground_truth_order: polynomial accuracy order to use for creating ground-
       truth labels used in the loss. -1 is a special sentinel value indicating
-      "maximum accuracy", i.e., a six-point stencil for Burgers' equation and
-      a spectral method for KdV and KS.
+      "maximum accuracy", i.e., WENO for Burgers' equation and a spectral method
+      for KdV and KS.
     num_time_steps: integer number of integration time steps to include in the
       loss.
     error_floor_quantile: float quantile to use for the error floor.
@@ -101,6 +101,9 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       for each derivative target.
     error_floor: List[float] with length num_channels giving the scale for
       weighting of relative errors.
+    error_max: float indicating the largest relative error (compared to
+      predicting no change over time) to use in computing each error term in the
+      loss. Larger errors values are clipped to this maximum value.
     relative_error_weight: float relative weighting for absolute error term in
       the loss.
     relative_error_weight: float relative weighting for relative error term in
@@ -151,6 +154,7 @@ def create_hparams(equation: str, **kwargs: Any) -> tf.contrib.training.HParams:
       error_floor_quantile=0.1,
       error_scale=[np.nan],  # set by set_data_dependent_hparams
       error_floor=[np.nan],  # set by set_data_dependent_hparams
+      error_max=0.0,
       absolute_error_weight=1.0,
       relative_error_weight=0.0,
       space_derivatives_weight=0.0,
@@ -272,40 +276,28 @@ class Inferer(object):
 
     _, coarse_equation = equations.from_hparams(hparams)
 
-    with tf.device('/cpu:0'):
-      coefficients = model.predict_coefficients(data['inputs'], hparams)
-      space_derivatives = model.apply_coefficients(coefficients, data['inputs'])
-      time_derivative = model.apply_space_derivatives(
-          space_derivatives, data['inputs'], coarse_equation)
-      if hparams.num_time_steps:
-        integrated_solution = model.predict_time_evolution(
-            data['inputs'], hparams)
-      else:
-        integrated_solution = None
-      predictions = model.result_stack(space_derivatives, time_derivative,
-                                       integrated_solution)
+    predictions = model.predict_result(data['inputs'], hparams)
+    loss_per_head = model.loss_per_head(
+        predictions,
+        labels=data['labels'],
+        baseline=data['baseline'],
+        hparams=hparams)
+    loss = model.weighted_loss(loss_per_head, hparams)
 
-      loss_per_head = model.loss_per_head(
-          predictions,
-          labels=data['labels'],
-          baseline=data['baseline'],
-          hparams=hparams)
-      loss = model.weighted_loss(loss_per_head, hparams)
+    results = dict(data, predictions=predictions)
+    metrics = {k: tf.contrib.metrics.streaming_concat(v)
+               for k, v in results.items()}
+    metrics['loss'] = tf.metrics.mean(loss)
 
-      results = dict(data, coefficients=coefficients, predictions=predictions)
-      metrics = {k: tf.contrib.metrics.streaming_concat(v)
-                 for k, v in results.items()}
-      metrics['loss'] = tf.metrics.mean(loss)
+    space_loss, time_loss, integrated_loss = model.result_unstack(
+        loss_per_head, coarse_equation)
+    metrics['loss/space_derivatives'] = tf.metrics.mean(space_loss)
+    metrics['loss/time_derivative'] = tf.metrics.mean(time_loss)
+    if integrated_loss is not None:
+      metrics['loss/integrated_solution'] = tf.metrics.mean(integrated_loss)
 
-      space_loss, time_loss, integrated_loss = model.result_unstack(
-          loss_per_head, coarse_equation)
-      metrics['loss/space_derivatives'] = tf.metrics.mean(space_loss)
-      metrics['loss/time_derivative'] = tf.metrics.mean(time_loss)
-      if integrated_loss is not None:
-        metrics['loss/integrated_solution'] = tf.metrics.mean(integrated_loss)
-
-      initializer = tf.group(iterator.initializer,
-                             tf.local_variables_initializer())
+    initializer = tf.group(iterator.initializer,
+                           tf.local_variables_initializer())
 
     self._initializer = initializer
     self._metrics = metrics
@@ -359,7 +351,7 @@ def load_dataset(dataset: tf.data.Dataset) -> Dict[str, np.ndarray]:
       k: tf.contrib.metrics.streaming_concat(v) for k, v in tensors.items()
   }
   initializer = tf.local_variables_initializer()
-  with tf.Session(config=_disable_rewrite_config()) as sess:
+  with tf.Session(config=_session_config()) as sess:
     return evaluate_metrics(sess, initializer, metrics)
 
 
@@ -387,7 +379,17 @@ def determine_loss_scales(
     dataset = model.make_dataset(snapshots, hparams, repeat=False)
     data = load_dataset(dataset)
 
-  baseline_error = (data['labels'] - data['baseline']) ** 2
+  baseline = data['baseline']
+  labels = data['labels']
+  inputs = data['inputs']
+
+  # Handle cases where we use WENO for only ground truth labels or predictions
+  if baseline.shape[-1] < labels.shape[-1]:
+    labels = labels[..., 1:]
+  elif baseline.shape[-1] > labels.shape[-1]:
+    labels = np.concatenate([labels[..., :1], labels], axis=-1)
+
+  baseline_error = (labels - baseline) ** 2
   percentile = 100 * hparams.error_floor_quantile
   error_floor = np.maximum(
       np.percentile(baseline_error, percentile, axis=(0, 1)), 1e-12)
@@ -396,17 +398,17 @@ def determine_loss_scales(
   # solution over time.
   equation_type = equations.equation_type_from_hparams(hparams)
   num_zero_predictions = len(equation_type.DERIVATIVE_ORDERS) + 1
-  labels_shape = data['labels'].shape
+  labels_shape = labels.shape
   predictions = np.concatenate([
       np.zeros(labels_shape[:-1] + (num_zero_predictions,)),
-      np.repeat(data['inputs'][..., np.newaxis],
+      np.repeat(inputs[..., np.newaxis],
                 labels_shape[-1] - num_zero_predictions,
                 axis=-1)
   ], axis=-1)
 
   components = np.stack(model.abs_and_rel_error(predictions=predictions,
-                                                labels=data['labels'],
-                                                baseline=data['baseline'],
+                                                labels=labels,
+                                                baseline=baseline,
                                                 error_floor=error_floor))
   baseline_error = np.mean(components, axis=(1, 2))
   logging.info('baseline_error: %s', baseline_error)
@@ -441,24 +443,34 @@ def calculate_metrics(
   Returns:
     Dict from evaluation metrics to scalar values.
   """
-  mae = (np.mean(abs(data['labels'] - data['predictions']), axis=(0, 1)) /
-         np.mean(abs(data['labels'] - data['baseline']), axis=(0, 1)))
+  labels = data['labels']
+  baseline = data['baseline']
+  predictions = data['predictions']
+
+  # Handle cases where we use WENO for only ground truth labels or predictions
+  if baseline.shape[-1] < labels.shape[-1]:
+    labels = labels[..., 1:]
+  elif baseline.shape[-1] > labels.shape[-1]:
+    labels = np.concatenate([labels[..., :1], labels], axis=-1)
+
+  mae = (np.mean(abs(labels - predictions), axis=(0, 1)) /
+         np.mean(abs(labels - baseline), axis=(0, 1)))
   rms_error = np.sqrt(
-      np.mean((data['labels'] - data['predictions']) ** 2, axis=(0, 1)) /
-      np.mean((data['labels'] - data['baseline']) ** 2, axis=(0, 1)))
+      np.mean((labels - predictions) ** 2, axis=(0, 1)) /
+      np.mean((labels - baseline) ** 2, axis=(0, 1)))
   mean_abs_relative_error = geometric_mean(
-      safe_abs(data['labels'] - data['predictions'])
-      / safe_abs(data['labels'] - data['baseline']),
+      safe_abs(labels - predictions)
+      / safe_abs(labels - baseline),
       axis=(0, 1))
   below_baseline = np.mean(
-      (data['labels'] - data['predictions']) ** 2
-      < (data['labels'] - data['baseline']) ** 2, axis=(0, 1))
+      (labels - predictions) ** 2
+      < (labels - baseline) ** 2, axis=(0, 1))
 
-  metrics = {'count': len(data['labels'])}
+  metrics = {'count': len(labels)}
   metrics.update({k: float(v) for k, v in data.items() if 'loss' in k})
-  target_names = ['y_' + 'x' * order
-                  for order in equation_type.DERIVATIVE_ORDERS] + ['y_t']
-  assert data['labels'].shape[-1] >= len(target_names)
+
+  target_names = list(equation_type.DERIVATIVE_NAMES) + ['u_t']
+  assert labels.shape[-1] >= len(target_names)
   for i, target in enumerate(target_names):
     metrics.update({
         'mae/' + target: mae[i],
@@ -467,8 +479,8 @@ def calculate_metrics(
         'frac_below_baseline/' + target: below_baseline[i],
     })
   time_index = len(target_names)
-  if time_index < data['labels'].shape[-1]:
-    target = 'y(t)'
+  if time_index < labels.shape[-1]:
+    target = 'u(t)'
     metrics.update({
         'mae/' + target: mae[time_index:].mean(),
         'rms_error/' + target: rms_error[time_index:].mean(),
@@ -535,8 +547,9 @@ def metrics_to_dataframe(
   return pd.DataFrame(all_metrics)
 
 
-def _disable_rewrite_config():
-  """TensorFlow config for disabling graph rewrites (b/92797692)."""
+def _session_config():
+  """Setup configuration for the TensorFlow session."""
+  # Disable graph rewrites (b/92797692)
   off = rewriter_config_pb2.RewriterConfig.OFF
   rewriter_config = rewriter_config_pb2.RewriterConfig(
       disable_model_pruning=True,
@@ -549,7 +562,8 @@ def _disable_rewrite_config():
       layout_optimizer=off,
       loop_optimization=off,
       memory_optimization=rewriter_config_pb2.RewriterConfig.NO_MEM_OPT)
-  graph_options = config_pb2.GraphOptions(rewrite_options=rewriter_config)
+  graph_options = config_pb2.GraphOptions(
+      rewrite_options=rewriter_config)
   return config_pb2.ConfigProto(graph_options=graph_options)
 
 
@@ -593,7 +607,7 @@ def training_loop(snapshots: np.ndarray,
       master=master,
       checkpoint_dir=checkpoint_dir,
       save_checkpoint_secs=300,
-      config=_disable_rewrite_config(),
+      config=_session_config(),
       hooks=[SaveAtEnd(checkpoint_dir_to_path(checkpoint_dir))]) as sess:
 
     test_writer = tf.summary.FileWriter(

@@ -29,6 +29,7 @@ from pde_superresolution import duckarray  # pylint: disable=g-bad-import-order
 from pde_superresolution import equations  # pylint: disable=g-bad-import-order
 from pde_superresolution import layers  # pylint: disable=g-bad-import-order
 from pde_superresolution import polynomials  # pylint: disable=g-bad-import-order
+from pde_superresolution import weno  # pylint: disable=g-bad-import-order
 
 
 TensorLike = Union[tf.Tensor, np.ndarray, numbers.Number]  # pylint: disable=invalid-name
@@ -63,23 +64,41 @@ def baseline_space_derivatives(
   assert_consistent_solution(equation, inputs)
 
   spatial_derivatives_list = []
-  for derivative_order in equation.DERIVATIVE_ORDERS:
+  for derivative_name, derivative_order in zip(
+      equation.DERIVATIVE_NAMES, equation.DERIVATIVE_ORDERS):
 
     if accuracy_order is None:
       # use the best baseline method
-      if equation.BASELINE is equations.Baseline.POLYNOMIAL:
+      assert equation.exact_type() is type(equation)
+      if equation.EXACT_METHOD is equations.ExactMethod.POLYNOMIAL:
         grid = (0.5 + np.arange(-3, 3)) * equation.grid.solution_dx
         method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
         derivative = polynomials.reconstruct(
             inputs, grid, method, derivative_order)
-      elif equation.BASELINE is equations.Baseline.SPECTRAL:
+      elif equation.EXACT_METHOD is equations.ExactMethod.SPECTRAL:
         derivative = duckarray.spectral_derivative(
             inputs, derivative_order, equation.grid.period)
-      else:
-        raise AssertionError('unknown baseline method')
+      elif equation.EXACT_METHOD is equations.ExactMethod.WENO:
+        if derivative_name == 'u_minus':
+          derivative = duckarray.roll(
+              weno.reconstruct_left(inputs), 1, axis=-1)
+        elif derivative_name == 'u_plus':
+          derivative = duckarray.roll(
+              weno.reconstruct_right(inputs), 1, axis=-1)
+        else:
+          assert derivative_name == 'u_x'
+          grid = polynomials.regular_grid(
+              grid_offset=equation.GRID_OFFSET,
+              derivative_order=derivative_order,
+              accuracy_order=3,
+              dx=equation.grid.solution_dx)
+          method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
+          derivative = polynomials.reconstruct(
+              inputs, grid, method, derivative_order)
 
     else:
       # explicit accuracy order provided
+      assert type(equation) not in equations.FLUX_EQUATION_TYPES
       grid = polynomials.regular_grid(
           grid_offset=equation.GRID_OFFSET,
           derivative_order=derivative_order,
@@ -237,7 +256,11 @@ def baseline_result(inputs: tf.Tensor,
     Float32 Tensor with dimensions [batch, x, channel] with inferred space
     derivatives, time derivative and the integrated solution.
   """
-  # TODO(shoyer): use a neural network to filter inputs, too.
+  if accuracy_order is None:
+    equation = equation.to_exact()
+  elif type(equation) in equations.FLUX_EQUATION_TYPES:
+    equation = equation.to_conservative()
+
   space_derivatives = baseline_space_derivatives(
       inputs, equation, accuracy_order=accuracy_order)
   time_derivative = apply_space_derivatives(
@@ -366,8 +389,14 @@ def make_dataset(snapshots: np.ndarray,
     indexer = slice(num_training, None)
 
   dataset = tf.data.Dataset.from_tensor_slices(snapshots[indexer])
-  dataset = dataset.map(lambda x: _stack_all_rolls(x, hparams.resample_factor))
+  # no need to do dataset augmentation with rolling for eval
+  rolls_stop = 1 if evaluation else hparams.resample_factor
+  dataset = dataset.map(lambda x: _stack_all_rolls(x, rolls_stop))
+  dataset = dataset.map(lambda x: model_inputs(x, hparams, evaluation))
   dataset = dataset.apply(tf.data.experimental.unbatch())
+  # our dataset is small enough to fit in memory and we are doing non-trivial
+  # preprocessing, so caching makes training *much* faster.
+  dataset = dataset.cache()
 
   if repeat:
     dataset = dataset.apply(
@@ -375,7 +404,6 @@ def make_dataset(snapshots: np.ndarray,
 
   batch_size = hparams.base_batch_size * hparams.resample_factor
   dataset = dataset.batch(batch_size)
-  dataset = dataset.map(lambda x: model_inputs(x, hparams, evaluation))
   dataset = dataset.prefetch(buffer_size=1)
   return dataset
 
@@ -448,6 +476,7 @@ def predict_coefficients(inputs: tf.Tensor,
 
     else:
       poly_accuracy_layers = []
+
       for derivative_order in equation.DERIVATIVE_ORDERS:
         method = FINITE_VOL if equation.CONSERVATIVE else FINITE_DIFF
         poly_accuracy_layers.append(
@@ -465,8 +494,10 @@ def predict_coefficients(inputs: tf.Tensor,
                                            kernel_size=hparams.kernel_size,
                                            activation=None, center=True)
       else:
-        coefficients = tf.get_variable('coefficients', (sum(input_sizes),),
-                                       initializer=tf.zeros_initializer())
+        initializer = tf.initializers.zeros()
+        coefficients = tf.get_variable(
+            'coefficients', (sum(input_sizes),),
+            initializer=initializer)
         net = tf.tile(coefficients[tf.newaxis, tf.newaxis, :],
                       [tf.shape(inputs)[0], inputs.shape[1].value, 1])
 
@@ -690,6 +721,11 @@ def abs_and_rel_error(predictions: T,
   Returns:
     Scalar float32 Tensor indicating the loss.
   """
+  # Handle cases where we use WENO for only ground truth labels or predictions
+  if duckarray.get_shape(baseline)[-1] < duckarray.get_shape(labels)[-1]:
+    labels = labels[..., 1:]
+  elif duckarray.get_shape(baseline)[-1] > duckarray.get_shape(labels)[-1]:
+    labels = tf.concat([labels[..., :1], labels], axis=-1)
   model_error = (labels - predictions) ** 2
   baseline_error = (labels - baseline) ** 2
   relative_error = model_error / (baseline_error + error_floor)
@@ -726,6 +762,13 @@ def loss_per_head(predictions: tf.Tensor,
       [tf.reduce_mean(model_error, axis=(0, 1)),
        tf.reduce_mean(relative_error, axis=(0, 1))], axis=0)
   normalized_loss_per_head = stacked_mean_error * error_scale
+
+  if hparams.error_max:
+    normalized_loss_per_head = tf.where(
+        normalized_loss_per_head < hparams.error_max,
+        normalized_loss_per_head,
+        hparams.error_max * tf.ones_like(normalized_loss_per_head))
+
   return normalized_loss_per_head
 
 

@@ -21,6 +21,8 @@ import os.path
 
 from absl import flags
 from absl.testing import flagsaver
+import apache_beam as beam
+from pde_superresolution.scripts import create_exact_data
 from pde_superresolution.scripts import create_training_data
 from pde_superresolution.scripts import run_evaluation
 from pde_superresolution.scripts import run_training
@@ -34,10 +36,11 @@ FLAGS = flags.FLAGS
 class IntegrationTest(absltest.TestCase):
 
   def test(self):
-    training_path = os.path.join(FLAGS.test_tmpdir, 'burgers.h5')
+    training_path = os.path.join(FLAGS.test_tmpdir, 'training.h5')
+    exact_path = os.path.join(FLAGS.test_tmpdir, 'exact.nc')
     checkpoint_dir = os.path.join(FLAGS.test_tmpdir, 'checkpoint')
-    output_name = 'results.nc'
-    output_path = os.path.join(checkpoint_dir, output_name)
+    samples_output_name = 'results.nc'
+    samples_output_path = os.path.join(checkpoint_dir, samples_output_name)
 
     with flagsaver.flagsaver(
         output_path=training_path,
@@ -47,7 +50,17 @@ class IntegrationTest(absltest.TestCase):
         time_max=1.0,
         time_delta=0.1,
         warmup=0):
-      create_training_data.main([])
+      create_training_data.main([], runner=beam.runners.DirectRunner())
+
+    with flagsaver.flagsaver(
+        output_path=exact_path,
+        equation_name='burgers',
+        equation_kwargs='{"num_points": 256}',
+        num_samples=2,
+        time_max=1.0,
+        time_delta=0.1,
+        warmup=1.0):
+      create_exact_data.main([], runner=beam.runners.DirectRunner())
 
     with flagsaver.flagsaver(
         checkpoint_dir=checkpoint_dir,
@@ -59,17 +72,18 @@ class IntegrationTest(absltest.TestCase):
 
     with flagsaver.flagsaver(
         checkpoint_dir=checkpoint_dir,
-        output_name=output_name,
+        exact_solution_path=exact_path,
+        samples_output_name=samples_output_name,
         num_samples=2,
         time_max=1.0,
         time_delta=0.1):
-      run_evaluation.main([])
+      run_evaluation.main([], runner=beam.runners.DirectRunner())
 
     # verify the results
-    with xarray.open_dataset(output_path) as ds:
+    with xarray.open_dataset(samples_output_path) as ds:
       self.assertEqual(dict(ds.dims),
-                       {'sample': 2, 'time': 11, 'x_high': 256, 'x_low': 64})
-      self.assertEqual(set(ds), {'y_exact', 'y_baseline', 'y_model'})
+                       {'sample': 2, 'time': 11, 'x': 64})
+      self.assertEqual(set(ds), {'y'})
 
 
 if __name__ == '__main__':

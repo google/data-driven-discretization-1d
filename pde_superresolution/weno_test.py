@@ -36,13 +36,13 @@ class WENOTest(parameterized.TestCase):
   def test_left_coefficients_smooth(self):
     u = np.zeros(5)
     actual = weno.left_coefficients(u)
-    expected = np.stack(5 * [[2/60, -13/60, 47/60, 27/60, -3/60]], axis=1)
+    expected = np.stack(5 * [[2/60, -13/60, 47/60, 27/60, -3/60]], axis=0)
     np.testing.assert_allclose(actual, expected)
 
   def test_right_coefficients_smooth(self):
     u = np.zeros(5)
     actual = weno.right_coefficients(u)
-    expected = np.stack(5 * [[-3/60, 27/60, 47/60, -13/60, 2/60]], axis=1)
+    expected = np.stack(5 * [[-3/60, 27/60, 47/60, -13/60, 2/60]], axis=0)
     np.testing.assert_allclose(actual, expected)
 
   def test_reconstruct_left_discontinuity(self):
@@ -81,6 +81,20 @@ class WENOTest(parameterized.TestCase):
     right_direct = weno.reconstruct_right(u)
     right_flipped = flip_staggered(weno.reconstruct_left(flip(u)))
     np.testing.assert_allclose(right_direct, right_flipped, atol=1e-6)
+
+  def test_batched(self):
+    u_batched = np.array([[0, 0, 0, 1, 2, 3, 4],
+                          [0, 0, 1, 2, 3, 4, 5]])
+    expected_left = np.stack([weno.reconstruct_left(u_batched[0]),
+                              weno.reconstruct_left(u_batched[1])])
+    expected_right = np.stack([weno.reconstruct_right(u_batched[0]),
+                               weno.reconstruct_right(u_batched[1])])
+
+    actual_left = weno.reconstruct_left(u_batched)
+    actual_right = weno.reconstruct_right(u_batched)
+
+    np.testing.assert_allclose(actual_left, expected_left)
+    np.testing.assert_allclose(actual_right, expected_right)
 
 
 if __name__ == '__main__':

@@ -18,10 +18,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
+
 from absl import app
 from absl import flags
 import apache_beam as beam
 from pde_superresolution import analysis  # pylint: disable=g-bad-import-order
+import pandas
 import tensorflow as tf
 import xarray
 
@@ -32,15 +35,17 @@ flags.DEFINE_string(
 flags.DEFINE_string(
     'exact_results_file', None,
     'Optional file providing alternative "exact" simulation results.')
-flags.DEFINE_float(
-    'time_max', 25,
-    'Maximum time to consider.')
+# These defaults values are chosen for Burgers [13, 15, 20, 25], KdV [51] and
+# KS [103]
+flags.DEFINE_string(
+    'stop_times', json.dumps([13, 15, 20, 25, 51, 103]),
+    'Cut-off times to use when calculating MAE.')
 
 
 FLAGS = flags.FLAGS
 
 
-def create_mae_netcdf(simulation_path, time_max=25, exact_path=None):
+def create_mae_netcdf(simulation_path, stop_times=None, exact_path=None):
   """Create a new netCDF file with mean absolute error."""
 
   if '/results.nc' not in simulation_path:
@@ -60,22 +65,31 @@ def create_mae_netcdf(simulation_path, time_max=25, exact_path=None):
 
   # do the analysis
   ds = analysis.unify_x_coords(ds)
-  ds = ds.sel(time=slice(None, time_max))
-  mae = abs(ds.drop('y_exact') - ds.y_exact).mean(['x', 'time'], skipna=False)
+
+  results = []
+  for time_max in stop_times:
+    ds = ds.sel(time=slice(None, time_max))
+    mae = abs(ds.drop('y_exact') - ds.y_exact).mean(['x', 'time'], skipna=False)
+    results.append(mae)
+  dim = pandas.Index(stop_times, name='time_max')
+  mae_all = xarray.concat(results, dim=dim)
 
   # save results
   mae_path = simulation_path.replace('/results.nc', '/mae.nc')
   with tf.gfile.GFile(mae_path, 'wb') as f:
-    f.write(mae.to_netcdf())
+    f.write(mae_all.to_netcdf())
 
 
-def main(_):
-  runner = beam.runners.DirectRunner()  # must create before flags are used
+def main(_, runner=None):
+  if runner is None:
+    # must create before flags are used
+    runner = beam.runners.DirectRunner()
 
   pipeline = (
       beam.Create(tf.gfile.Glob(FLAGS.file_pattern))
       | beam.Reshuffle()
-      | beam.Map(create_mae_netcdf, time_max=FLAGS.time_max,
+      | beam.Map(create_mae_netcdf,
+                 stop_times=json.loads(FLAGS.stop_times),
                  exact_path=FLAGS.exact_results_file)
   )
   runner.run(pipeline)

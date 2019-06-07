@@ -50,7 +50,7 @@ class CreateBaselineDataTest(absltest.TestCase):
     # verify the results
     with xarray.open_dataset(output_path) as ds:
       self.assertEqual(ds['y'].dims, ('sample', 'accuracy_order', 'time', 'x'))
-      self.assertEqual(ds['y'].shape, (2, 3, 10, 400))
+      self.assertEqual(ds['y'].shape, (2, 3, 11, 400))
 
 
 if __name__ == '__main__':

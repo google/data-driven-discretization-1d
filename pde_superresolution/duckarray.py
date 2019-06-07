@@ -38,6 +38,14 @@ def concatenate(arrays: List[T], axis: int) -> T:
     return np.concatenate(arrays, axis=axis)
 
 
+def stack(arrays: List[T], axis: int) -> T:
+  """Stack arrays or tensors."""
+  if isinstance(arrays[0], tf.Tensor):
+    return tf.stack(arrays, axis=axis)
+  else:
+    return np.stack(arrays, axis=axis)
+
+
 def sin(x: T) -> T:
   if isinstance(x, tf.Tensor):
     return tf.sin(x)
@@ -45,18 +53,18 @@ def sin(x: T) -> T:
     return np.sin(x)
 
 
-def sum(x: T, axis: int = None) -> T:  # pylint: disable=redefined-builtin
+def sum(x: T, axis: int = None, **kwargs) -> T:  # pylint: disable=redefined-builtin
   if isinstance(x, tf.Tensor):
-    return tf.reduce_sum(x, axis=axis)
+    return tf.reduce_sum(x, axis=axis, **kwargs)
   else:
-    return np.sum(x, axis=axis)
+    return np.sum(x, axis=axis, **kwargs)
 
 
-def mean(x: T, axis: int = None) -> T:
+def mean(x: T, axis: int = None, **kwargs) -> T:
   if isinstance(x, tf.Tensor):
-    return tf.reduce_mean(x, axis=axis)
+    return tf.reduce_mean(x, axis=axis, **kwargs)
   else:
-    return np.mean(x, axis=axis)
+    return np.mean(x, axis=axis, **kwargs)
 
 
 def get_shape(x: Union[tf.Tensor, np.ndarray]) -> Tuple[Optional[int]]:
@@ -120,10 +128,9 @@ def smoothing_filter(x: T,
   return irfft(sigma * rfft(x))
 
 
-def _normalize_axis(axis: int, shape: Tuple[int]) -> int:
-  ndim = len(shape)
+def _normalize_axis(axis: int, ndim: int) -> int:
   if not -ndim <= axis < ndim:
-    raise ValueError('invalid axis {} for shape {}'.format(axis, shape))
+    raise ValueError('invalid axis {} for ndim {}'.format(axis, ndim))
   if axis < 0:
     axis += ndim
   return axis
@@ -144,7 +151,7 @@ def resample_mean(inputs: T, factor: int, axis: int = -1) -> T:
     ValueError: if x is not evenly divided by factor.
   """
   shape = get_shape(inputs)
-  axis = _normalize_axis(axis, shape)
+  axis = _normalize_axis(axis, len(shape))
   if shape[axis] % factor:
     raise ValueError('resample factor {} must divide size {}'
                      .format(factor, shape[axis]))
@@ -171,7 +178,7 @@ def subsample(inputs: T, factor: int, axis: int = -1) -> T:
     ValueError: if x is not evenly divided by factor.
   """
   shape = get_shape(inputs)
-  axis = _normalize_axis(axis, shape)
+  axis = _normalize_axis(axis, len(shape))
   if shape[axis] % factor:
     raise ValueError('resample factor {} must divide size {}'
                      .format(factor, shape[axis]))
@@ -180,6 +187,36 @@ def subsample(inputs: T, factor: int, axis: int = -1) -> T:
   indexer[axis] = slice(None, None, factor)
 
   return inputs[tuple(indexer)]
+
+
+def _roll_once(
+    tensor: T,
+    shift: int,
+    axis: int,
+) -> T:
+  """Roll along a single dimension like tf.roll()."""
+  if not shift:
+    return tensor
+  axis = _normalize_axis(axis, len(tensor.shape))
+  slice_left = (slice(None),) * axis + (slice(-shift, None),)
+  slice_right = (slice(None),) * axis + (slice(None, -shift),)
+  return concatenate([tensor[slice_left], tensor[slice_right]], axis=axis)
+
+
+def roll(
+    tensor: T,
+    shift: Union[int, Sequence[int]],
+    axis: Union[int, Sequence[int]],
+) -> T:
+  """Like tf.roll(), but runs on GPU as a well as CPU."""
+  if isinstance(axis, int):
+    axis = [axis]
+  if isinstance(shift, int):
+    shift = [shift]
+  result = tensor
+  for axis_element, shift_element in zip(axis, shift):
+    result = _roll_once(result, shift_element, axis_element)
+  return result
 
 
 RESAMPLE_FUNCS = {

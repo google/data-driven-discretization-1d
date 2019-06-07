@@ -103,6 +103,16 @@ class PolynomialsTest(parameterized.TestCase):
     residual = np.einsum('ij,bj->bi', A, outputs) - b
     np.testing.assert_allclose(residual, 0, atol=1e-7)
 
+  def test_polynomial_accuracy_layer_bias_zero_padding(self):
+    layer = polynomials.PolynomialAccuracyLayer(
+        np.array([-1.5, -0.5, 0.5, 1.5]), FINITE_DIFF, derivative_order=0,
+        bias_zero_padding=(0, 1))
+    expected_bias = np.concatenate(
+        [polynomials.coefficients(
+            np.array([-1.5, -0.5, 0.5]), FINITE_DIFF, derivative_order=0),
+         [0.0]])
+    np.testing.assert_allclose(layer.bias, expected_bias)
+
   @parameterized.parameters(
       dict(derivative_order=0,
            grid_offset=polynomials.GridOffset.CENTERED,

@@ -143,6 +143,29 @@ class IntegrateTest(parameterized.TestCase):
       xarray.testing.assert_allclose(
           y_mean, xarray.zeros_like(y_mean), atol=1e-3)
 
+  def test_burgers_exact_weno(self):
+    equation = equations.BurgersEquation(200)
+    results_exact = integrate.integrate_exact(
+        equation, times=np.linspace(0, 1, num=11))
+
+    equation = equations.GodunovBurgersEquation(200)
+    results_weno = integrate.integrate_weno(
+        equation, times=np.linspace(0, 1, num=11))
+    np.testing.assert_allclose(
+        results_exact['y'].data, results_weno['y'].data, atol=1e-10)
+
+  @parameterized.parameters(
+      dict(equation=equations.KdVEquation(200)),
+      dict(equation=equations.KSEquation(200)),
+  )
+  def test_spectral_exact(self, equation):
+    results_exact = integrate.integrate_exact(
+        equation, times=np.linspace(0, 1, num=11))
+    results_spectra = integrate.integrate_spectral(
+        equation, times=np.linspace(0, 1, num=11))
+    np.testing.assert_allclose(
+        results_exact['y'].data, results_spectra['y'].data, atol=1e-10)
+
   @parameterized.parameters(
       dict(equation=equations.BurgersEquation(200)),
       dict(equation=equations.ConservativeBurgersEquation(200)),
