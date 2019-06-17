@@ -20,6 +20,6 @@ required.
 
 From the source directory, execute each test file:
 
-    cd pde-superresolution
+    cd data-driven-discretization-1d
     python ./pde_superresolution/integrate_test.py
     python ./pde_superresolution/training_test.py
