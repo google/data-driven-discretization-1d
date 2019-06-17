@@ -9,7 +9,7 @@ This code for Data Driven Discretization was developed for and used in [https://
 
 Clone this repository and install in-place:
 
-    git clone https://github.com/google/pde-superresolution.git
+    git clone https://github.com/google/data-driven-discretization-1d.git
     pip install -e pde-superresolution
 
 Note that Python 3 is required. Dependencies for the core library (including
