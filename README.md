@@ -3,7 +3,7 @@
 This is not an official Google product.
 
 # Deprecation
-This code for Data Driven Discretization was developed for and used in [https://arxiv.org/abs/1808.04930]. The code is fully functional, but is no longer maintained. It was deprecated by a new implementation that can natively handle higher dimensions and is better designed to be generalized. It will be made public soon. If you want to implement our method on your favorite equation, please contact the authors.
+This code for Data Driven Discretization was developed for and used in [https://arxiv.org/abs/1808.04930]. The code is fully functional, but is no longer maintained. It was deprecated by a new implementation that can natively handle higher dimensions and is better designed to be generalized. The new code is available [here](https://github.com/google-research/data-driven-pdes). If you want to implement our method on your favorite equation, please contact the authors.
 
 ## Installation
 
