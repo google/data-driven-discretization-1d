@@ -11,7 +11,11 @@ Proceedings of the National Academy of Sciences Jul 2019, 116 (31) 15344-15349; 
 
 This code for Data Driven Discretization was developed for and used in [https://arxiv.org/abs/1808.04930]. The code is fully functional, but is no longer maintained. It was deprecated by a new implementation that can natively handle higher dimensions and is better designed to be generalized. The new code is available [here](https://github.com/google-research/data-driven-pdes). If you want to implement our method on your favorite equation, please contact the authors.
 
-## Installation
+## Running the code
+
+### Local installation
+
+If desired, you can install the code locally. You can also run using Google's hosted Colab notebook service (see below for examples).
 
 Clone this repository and install in-place:
 
@@ -23,15 +27,13 @@ TensorFlow) are specified in setup.py and should be installed automatically as
 required. Also note that TensorFlow 1.x is required: this code has not been
 updated to use TensorFlow 2.0.
 
-## Running tests
-
 From the source directory, execute each test file:
 
     cd data-driven-discretization-1d
     python ./pde_superresolution/integrate_test.py
     python ./pde_superresolution/training_test.py
 
-## Training your own model
+### Training your own models
 
 We used the scripts in the `pde_superresolution/scripts` directly to run
 training. In particular, see `run_training.py`.
@@ -43,9 +45,11 @@ downloaded from Google Cloud Storage:
 - https://storage.googleapis.com/data-driven-discretization-public/training-data/kdv.h5
 - https://storage.googleapis.com/data-driven-discretization-public/training-data/ks.h5
 
-We have two notebooks showing how to train and run parts of our model:
+We have two notebooks showing how to train and run parts of our model. As written, these notebooks are intended to run in Google Colab, which can do by clicking the links below:
 - [Super resolution of Burgers' equation](https://colab.research.google.com/github/google/data-driven-discretization-1d/blob/master/notebooks/burgers-super-resolution.ipynb)
 - [Time integration of Burgers' equation](https://colab.research.google.com/github/google/data-driven-discretization-1d/blob/master/notebooks/time-integration.ipynb)
+
+These notebooks install the code from scratch; skip those cells if running things locally. You will also need [gsutil](https://cloud.google.com/storage/docs/gsutil) installed to download data from Google Cloud Storage.
 
 ## Citation
 
