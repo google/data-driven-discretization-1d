@@ -20,7 +20,8 @@ Clone this repository and install in-place:
 
 Note that Python 3 is required. Dependencies for the core library (including
 TensorFlow) are specified in setup.py and should be installed automatically as
-required.
+required. Also note that TensorFlow 1.x is required: this code has not been
+updated to use TensorFlow 2.0.
 
 ## Running tests
 
@@ -42,9 +43,9 @@ downloaded from Google Cloud Storage:
 - https://storage.googleapis.com/data-driven-discretization-public/training-data/kdv.h5
 - https://storage.googleapis.com/data-driven-discretization-public/training-data/ks.h5
 
-https://colab.research.google.com/github/google/data-driven-discretization-1d/blob/master/notebooks/optimization-examples.ipynb
-
-The outputs of all of models were quite large, so we haven't shared it all publically yet.
+We have two notebooks showing how to train and run parts of our model:
+- [Super resolution of Burgers' equation](https://colab.research.google.com/github/google/data-driven-discretization-1d/blob/master/notebooks/burgers-super-resolution.ipynb)
+- [Time integration of Burgers' equation](https://colab.research.google.com/github/google/data-driven-discretization-1d/blob/master/notebooks/time-integration.ipynb)
 
 ## Citation
 
