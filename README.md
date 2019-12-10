@@ -20,7 +20,7 @@ If desired, you can install the code locally. You can also run using Google's ho
 Clone this repository and install in-place:
 
     git clone https://github.com/google/data-driven-discretization-1d.git
-    pip install -e pde-superresolution
+    pip install -e data-driven-discretization-1d
 
 Note that Python 3 is required. Dependencies for the core library (including
 TensorFlow) are specified in setup.py and should be installed automatically as
