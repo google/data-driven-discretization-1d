@@ -23,7 +23,7 @@ INSTALL_REQUIRES = [
     'numpy',
     'pandas',
     'scipy',
-    'tensorflow<2',
+    'tensorflow<3',
     'xarray',
 ]
 
